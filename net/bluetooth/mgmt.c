@@ -7469,20 +7469,25 @@ static int get_clock_info_sync(struct hci_dev *hdev, void *data)
 	struct mgmt_cp_get_clock_info *cp = cmd->param;
 	struct hci_cp_read_clock hci_cp;
 	struct hci_conn *conn;
+	int err;
 
 	memset(&hci_cp, 0, sizeof(hci_cp));
-	hci_read_clock_sync(hdev, &hci_cp);
+	err = hci_read_clock_sync(hdev, &hci_cp);
 
-	/* Make sure connection still exists */
-	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &cp->addr.bdaddr);
-	if (!conn || conn->state != BT_CONNECTED)
-		return MGMT_STATUS_NOT_CONNECTED;
+	if (bacmp(&cp->addr.bdaddr, BDADDR_ANY) && !err) {
+		/* Make sure connection still exists */
+		conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &cp->addr.bdaddr);
+		if (!conn || conn->state != BT_CONNECTED)
+			return MGMT_STATUS_NOT_CONNECTED;
 
-	cmd->user_data = conn;
-	hci_cp.handle = cpu_to_le16(conn->handle);
-	hci_cp.which = 0x01; /* Piconet clock */
+		cmd->user_data = conn;
+		hci_cp.handle = cpu_to_le16(conn->handle);
+		hci_cp.which = 0x01; /* Piconet clock */
 
-	return hci_read_clock_sync(hdev, &hci_cp);
+		err = hci_read_clock_sync(hdev, &hci_cp);
+	}
+
+	return err;
 }
 
 static int get_clock_info(struct sock *sk, struct hci_dev *hdev, void *data,
@@ -7491,7 +7496,6 @@ static int get_clock_info(struct sock *sk, struct hci_dev *hdev, void *data,
 	struct mgmt_cp_get_clock_info *cp = data;
 	struct mgmt_rp_get_clock_info rp;
 	struct mgmt_pending_cmd *cmd;
-	struct hci_conn *conn;
 	int err;
 
 	bt_dev_dbg(hdev, "sock %p", sk);
@@ -7515,6 +7519,8 @@ static int get_clock_info(struct sock *sk, struct hci_dev *hdev, void *data,
 	}
 
 	if (bacmp(&cp->addr.bdaddr, BDADDR_ANY)) {
+		struct hci_conn *conn;
+
 		conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK,
 					       &cp->addr.bdaddr);
 		if (!conn || conn->state != BT_CONNECTED) {
@@ -7524,8 +7530,6 @@ static int get_clock_info(struct sock *sk, struct hci_dev *hdev, void *data,
 						&rp, sizeof(rp));
 			goto unlock;
 		}
-	} else {
-		conn = NULL;
 	}
 
 	cmd = mgmt_pending_new(sk, MGMT_OP_GET_CLOCK_INFO, hdev, data, len);
