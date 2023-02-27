@@ -29,4 +29,13 @@ struct sockaddr_iso {
 	struct sockaddr_iso_bc iso_bc[];
 };
 
+#define ISO_CMSG_PKT_STATUS	0x01
+
+struct bt_iso_pkt_status {
+	__u32 timestamp;
+	__u16 sn;
+	__u8  ts;
+	__u8  status;
+} __packed;
+
 #endif /* __ISO_H */

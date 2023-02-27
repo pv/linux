@@ -417,6 +417,13 @@ struct sco_ctrl {
 	u8	pkt_status;
 };
 
+struct iso_ctrl {
+	u8	status;
+	u8	ts;
+	u16	sn;
+	u32	timestamp;
+};
+
 struct hci_dev;
 
 typedef void (*hci_req_complete_t)(struct hci_dev *hdev, u8 status, u16 opcode);
@@ -450,6 +457,7 @@ struct bt_skb_cb {
 	union {
 		struct l2cap_ctrl l2cap;
 		struct sco_ctrl sco;
+		struct iso_ctrl iso;
 		struct hci_ctrl hci;
 		struct mgmt_ctrl mgmt;
 	};
