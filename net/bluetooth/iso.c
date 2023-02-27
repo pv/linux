@@ -61,6 +61,7 @@ struct iso_pinfo {
 	struct bt_iso_qos	qos;
 	__u8			base_len;
 	__u8			base[BASE_MAX_LENGTH];
+	__u8			cmsg_mask;
 	struct iso_conn		*conn;
 };
 
@@ -642,6 +643,24 @@ static void __iso_sock_close(struct sock *sk)
 	}
 }
 
+static void iso_skb_put_cmsg(struct sk_buff *skb, struct msghdr *msg,
+			     struct sock *sk)
+{
+	if (iso_pi(sk)->cmsg_mask & ISO_CMSG_PKT_STATUS) {
+		struct bt_iso_pkt_status status;
+
+		memset(&status, 0, sizeof(status));
+
+		status.timestamp = bt_cb(skb)->iso.timestamp;
+		status.ts = bt_cb(skb)->iso.ts;
+		status.sn = bt_cb(skb)->iso.sn;
+		status.status = bt_cb(skb)->iso.status;
+
+		put_cmsg(msg, SOL_BLUETOOTH, BT_SCM_PKT_STATUS,
+			 sizeof(status), &status);
+	}
+}
+
 /* Must be called on unlocked socket. */
 static void iso_sock_close(struct sock *sk)
 {
@@ -660,6 +679,8 @@ static void iso_sock_init(struct sock *sk, struct sock *parent)
 		sk->sk_type = parent->sk_type;
 		bt_sk(sk)->flags = bt_sk(parent)->flags;
 		security_sk_clone(parent, sk);
+	} else {
+		bt_sk(sk)->skb_put_cmsg = iso_skb_put_cmsg;
 	}
 }
 
@@ -1257,6 +1278,18 @@ static int iso_sock_setsockopt(struct socket *sock, int level, int optname,
 
 		break;
 
+	case BT_PKT_STATUS:
+		if (copy_from_sockptr(&opt, optval, sizeof(u32))) {
+			err = -EFAULT;
+			break;
+		}
+
+		if (opt)
+			iso_pi(sk)->cmsg_mask |= ISO_CMSG_PKT_STATUS;
+		else
+			iso_pi(sk)->cmsg_mask &= ~ISO_CMSG_PKT_STATUS;
+		break;
+
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -1274,6 +1307,7 @@ static int iso_sock_getsockopt(struct socket *sock, int level, int optname,
 	struct bt_iso_qos *qos;
 	u8 base_len;
 	u8 *base;
+	int pkt_status;
 
 	BT_DBG("sk %p", sk);
 
@@ -1317,6 +1351,13 @@ static int iso_sock_getsockopt(struct socket *sock, int level, int optname,
 		if (copy_to_user(optval, base, len))
 			err = -EFAULT;
 
+		break;
+
+	case BT_PKT_STATUS:
+		pkt_status = (iso_pi(sk)->cmsg_mask & ISO_CMSG_PKT_STATUS);
+
+		if (put_user(pkt_status, (int __user *)optval))
+			err = -EFAULT;
 		break;
 
 	default:
@@ -1641,15 +1682,19 @@ void iso_recv(struct hci_conn *hcon, struct sk_buff *skb, u16 flags)
 			conn->rx_len = 0;
 		}
 
+		bt_cb(skb)->iso.ts = ts;
+
 		if (ts) {
 			struct hci_iso_ts_data_hdr *hdr;
 
-			/* TODO: add timestamp to the packet? */
 			hdr = skb_pull_data(skb, HCI_ISO_TS_DATA_HDR_SIZE);
 			if (!hdr) {
 				BT_ERR("Frame is too short (len %d)", skb->len);
 				goto drop;
 			}
+
+			bt_cb(skb)->iso.timestamp = __le32_to_cpu(hdr->ts);
+			bt_cb(skb)->iso.sn = __le16_to_cpu(hdr->sn);
 
 			len = __le16_to_cpu(hdr->slen);
 		} else {
@@ -1661,11 +1706,16 @@ void iso_recv(struct hci_conn *hcon, struct sk_buff *skb, u16 flags)
 				goto drop;
 			}
 
+			bt_cb(skb)->iso.timestamp = 0;
+			bt_cb(skb)->iso.sn = __le16_to_cpu(hdr->sn);
+
 			len = __le16_to_cpu(hdr->slen);
 		}
 
 		flags  = hci_iso_data_flags(len);
 		len    = hci_iso_data_len(len);
+
+		bt_cb(skb)->iso.status = flags;
 
 		BT_DBG("Start: total len %d, frag len %d flags 0x%4.4x", len,
 		       skb->len, flags);
