@@ -38,4 +38,20 @@ struct bt_iso_pkt_status {
 	__u8  status;
 };
 
+#define SIOCBTISOTXINFO		(SIOCPROTOPRIVATE + 0)
+
+/* ISO timing and packet information, both from packet completion and
+ * LE Read ISO TX Sync, at a point of time immediately after completion
+ * of the read sync command.
+ */
+struct bt_iso_tx_info {
+	__u64	time;
+	__u64	pkt_time;
+	__u16	pkt_sn;
+	__u16	pkt_queue;
+	__u32	sync_timestamp;
+	__u32	sync_offset;
+	__u16	sync_sn;
+};
+
 #endif /* __ISO_H */

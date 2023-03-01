@@ -33,6 +33,8 @@ struct iso_conn {
 	struct sk_buff	*rx_skb;
 	__u32		rx_len;
 	__u16		tx_sn;
+
+	struct bt_iso_tx_info	tx_info;
 };
 
 #define iso_conn_lock(c)	spin_lock(&(c)->lock)
@@ -1797,6 +1799,84 @@ drop:
 	kfree_skb(skb);
 }
 
+static int read_tx_sync(struct hci_dev *hdev, void *data)
+{
+	u16 handle = PTR_ERR(data);
+
+	return hci_le_read_iso_tx_sync_sync(hdev, cpu_to_le16(handle));
+}
+
+static void read_tx_sync_complete(struct hci_dev *hdev, void *data, int err)
+{
+	u16 handle = PTR_ERR(data);
+	struct hci_conn *hcon;
+	struct iso_conn *conn;
+
+	if (err)
+		return;
+
+	hci_dev_lock(hdev);
+
+	hcon = hci_conn_hash_lookup_handle(hdev, handle);
+	if (!hcon || !hcon->iso_data)
+		goto unlock;
+
+	conn = hcon->iso_data;
+
+	/* Update all TX info values now, so they correspond
+	 * to the same point of time.
+	 */
+	conn->tx_info.time = ktime_to_ns(ktime_get());
+	conn->tx_info.pkt_time = ktime_to_ns(hcon->iso_tx.pkt_time);
+	conn->tx_info.pkt_sn = hcon->iso_tx.pkt_sn;
+	conn->tx_info.pkt_queue = hcon->iso_tx.pkt_queue;
+	conn->tx_info.sync_timestamp = hcon->iso_tx.sync_timestamp;
+	conn->tx_info.sync_sn = hcon->iso_tx.sync_sn;
+	conn->tx_info.sync_offset = hcon->iso_tx.sync_offset;
+
+unlock:
+	hci_dev_unlock(hdev);
+}
+
+static int iso_queue_read_tx_info(struct hci_conn *conn)
+{
+	struct hci_dev *hdev = conn->hdev;
+
+	return hci_cmd_sync_queue(hdev, read_tx_sync, ERR_PTR(conn->handle),
+				  read_tx_sync_complete);
+}
+
+static int iso_sock_ioctl(struct socket *sock, unsigned int cmd,
+			  unsigned long arg)
+{
+	struct sock *sk = sock->sk;
+	struct iso_conn *conn = iso_pi(sk)->conn;
+	struct bt_iso_tx_info ctl;
+
+	BT_DBG("sk %p cmd %x arg %lx", sk, cmd, arg);
+
+	switch (cmd) {
+	case SIOCBTISOTXINFO:
+		memset(&ctl, 0, sizeof(ctl));
+
+		if (conn->hcon->iso_tx.pkt_time) {
+			hci_dev_lock(conn->hcon->hdev);
+
+			ctl = conn->tx_info;
+			iso_queue_read_tx_info(conn->hcon);
+
+			hci_dev_unlock(conn->hcon->hdev);
+		}
+
+		if (copy_to_user((void __user *)arg, &ctl, sizeof(ctl)))
+			return -EFAULT;
+
+		return 0;
+	}
+
+	return bt_sock_ioctl(sock, cmd, arg);
+}
+
 static struct hci_cb iso_cb = {
 	.name		= "ISO",
 	.connect_cfm	= iso_connect_cfm,
@@ -1835,7 +1915,7 @@ static const struct proto_ops iso_sock_ops = {
 	.sendmsg	= iso_sock_sendmsg,
 	.recvmsg	= iso_sock_recvmsg,
 	.poll		= bt_sock_poll,
-	.ioctl		= bt_sock_ioctl,
+	.ioctl		= iso_sock_ioctl,
 	.mmap		= sock_no_mmap,
 	.socketpair	= sock_no_socketpair,
 	.shutdown	= iso_sock_shutdown,
