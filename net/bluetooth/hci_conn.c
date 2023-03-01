@@ -2191,6 +2191,20 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 	return cis;
 }
 
+int hci_conn_queue_iso_tx_update(struct hci_conn *conn)
+{
+	struct hci_cp_le_read_iso_tx_sync cp;
+
+	if (!(conn->hdev->commands[41] & 0x40))
+		return -EOPNOTSUPP;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.handle = cpu_to_le16(conn->handle);
+
+	return hci_send_cmd(conn->hdev, HCI_OP_LE_READ_ISO_TX_SYNC,
+			    sizeof(cp), &cp);
+}
+
 /* Check link security requirement */
 int hci_conn_check_link_mode(struct hci_conn *conn)
 {
