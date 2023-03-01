@@ -1873,6 +1873,70 @@ drop:
 	kfree_skb(skb);
 }
 
+static void get_tx_info(struct hci_conn *hcon, struct bt_iso_tx_info *info,
+			bool sync)
+{
+	if (hcon->iso_tx.have_sync) {
+		info->sync_time = ktime_to_ns(hcon->iso_tx.sync_time);
+		info->sync_timestamp = hcon->iso_tx.sync_timestamp;
+		info->sync_sn = hcon->iso_tx.sync_sn;
+		info->sync_offset = hcon->iso_tx.sync_offset;
+	}
+
+	if (sync) {
+		info->pkt_time = ktime_to_ns(hcon->iso_tx.sync_pkt_time);
+		info->pkt_sn = hcon->iso_tx.sync_pkt_sn;
+		info->pkt_queue = hcon->iso_tx.sync_pkt_queue;
+	} else {
+		info->pkt_time = ktime_to_ns(hcon->iso_tx.pkt_time);
+		info->pkt_sn = hcon->iso_tx.pkt_sn;
+		info->pkt_queue = hcon->iso_tx.pkt_queue;
+	}
+}
+
+static int iso_sock_ioctl(struct socket *sock, unsigned int cmd,
+			  unsigned long arg)
+{
+	struct sock *sk = sock->sk;
+	struct iso_conn *conn = iso_pi(sk)->conn;
+	struct bt_iso_tx_info info;
+	bool sync, queue;
+
+	BT_DBG("sk %p cmd %x arg %lx", sk, cmd, arg);
+
+	switch (cmd) {
+	case SIOCBTREADISOTXINFO:
+		if (copy_from_user(&info, (void __user *)arg, sizeof(info)))
+			return -EFAULT;
+
+		sync = (info.flags & BT_ISO_TX_INFO_FLAG_SYNC_PKT);
+		queue = (info.flags & BT_ISO_TX_INFO_FLAG_QUEUE);
+
+		memset(&info, 0, sizeof(info));
+
+		if (conn->hcon->iso_tx.pkt_time) {
+			hci_dev_lock(conn->hcon->hdev);
+
+			get_tx_info(conn->hcon, &info, sync);
+
+			if (queue)
+				hci_conn_queue_iso_tx_update(conn->hcon);
+
+			hci_dev_unlock(conn->hcon->hdev);
+		}
+
+		if (sync)
+			info.flags |= BT_ISO_TX_INFO_FLAG_SYNC_PKT;
+
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
+			return -EFAULT;
+
+		return 0;
+	}
+
+	return bt_sock_ioctl(sock, cmd, arg);
+}
+
 static struct hci_cb iso_cb = {
 	.name		= "ISO",
 	.connect_cfm	= iso_connect_cfm,
@@ -1911,7 +1975,7 @@ static const struct proto_ops iso_sock_ops = {
 	.sendmsg	= iso_sock_sendmsg,
 	.recvmsg	= iso_sock_recvmsg,
 	.poll		= bt_sock_poll,
-	.ioctl		= bt_sock_ioctl,
+	.ioctl		= iso_sock_ioctl,
 	.mmap		= sock_no_mmap,
 	.socketpair	= sock_no_socketpair,
 	.shutdown	= iso_sock_shutdown,
