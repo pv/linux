@@ -260,6 +260,21 @@ struct adv_info {
 	struct delayed_work	rpa_expired_cb;
 };
 
+struct iso_tx {
+	ktime_t	pkt_time;
+	__u16	pkt_sn;
+	__u16	pkt_queue;
+	ktime_t sync_pkt_time;
+	__u16	sync_pkt_sn;
+	__u16	sync_pkt_queue;
+	ktime_t	sync_time;
+	__u32	sync_timestamp;
+	__u32	sync_offset;
+	__u16	sync_sn;
+	__u16	sent_sn;
+	bool    have_sync;
+};
+
 #define HCI_MAX_ADV_INSTANCES		5
 #define HCI_DEFAULT_ADV_DURATION	2
 
@@ -730,6 +745,7 @@ struct hci_conn {
 	__s8		tx_power;
 	__s8		max_tx_power;
 	struct bt_iso_qos iso_qos;
+	struct iso_tx   iso_tx;
 	unsigned long	flags;
 
 	enum conn_reasons conn_reason;
@@ -1333,6 +1349,7 @@ int hci_pa_create_sync(struct hci_dev *hdev, bdaddr_t *dst, __u8 dst_type,
 		       __u8 sid);
 int hci_le_big_create_sync(struct hci_dev *hdev, struct bt_iso_qos *qos,
 			   __u16 sync_handle, __u8 num_bis, __u8 bis[]);
+int hci_conn_queue_iso_tx_update(struct hci_conn *conn);
 int hci_conn_check_link_mode(struct hci_conn *conn);
 int hci_conn_check_secure(struct hci_conn *conn, __u8 sec_level);
 int hci_conn_security(struct hci_conn *conn, __u8 sec_level, __u8 auth_type,

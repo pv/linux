@@ -3250,6 +3250,9 @@ static void hci_queue_iso(struct hci_conn *conn, struct sk_buff_head *queue,
 		do {
 			skb = list; list = list->next;
 
+			bt_cb(skb)->iso.sn = 0;
+			bt_cb(skb)->iso.status = 0;
+
 			hci_skb_pkt_type(skb) = HCI_ISODATA_PKT;
 			flags = hci_iso_flags_pack(list ? ISO_CONT : ISO_END,
 						   0x00);
@@ -3750,6 +3753,10 @@ static void hci_sched_iso(struct hci_dev *hdev)
 	while (*cnt && (conn = hci_low_sent(hdev, ISO_LINK, &quote))) {
 		while (quote-- && (skb = skb_dequeue(&conn->data_q))) {
 			BT_DBG("skb %p len %d", skb, skb->len);
+
+			if (bt_cb(skb)->iso.status)
+				conn->iso_tx.sent_sn = bt_cb(skb)->iso.sn;
+
 			hci_send_frame(hdev, skb);
 
 			conn->sent++;
