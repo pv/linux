@@ -3815,6 +3815,42 @@ static u8 hci_cc_le_read_buffer_size_v2(struct hci_dev *hdev, void *data,
 	return rp->status;
 }
 
+static u8 hci_cc_le_read_iso_tx_sync(struct hci_dev *hdev, void *data,
+				     struct sk_buff *skb)
+{
+	struct hci_rp_le_read_iso_tx_sync *rp = data;
+	struct hci_conn *conn;
+	ktime_t now = ktime_get();
+
+	bt_dev_dbg(hdev, "status 0x%2.2x", rp->status);
+
+	if (rp->status)
+		return rp->status;
+
+	hci_dev_lock(hdev);
+
+	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(rp->handle));
+	if (!conn)
+		goto unlock;
+
+	conn->iso_tx.have_sync = true;
+	conn->iso_tx.sync_time = now;
+
+	conn->iso_tx.sync_sn = __le16_to_cpu(rp->seq);
+	conn->iso_tx.sync_timestamp = __le32_to_cpu(rp->timestamp);
+	conn->iso_tx.sync_offset = (rp->offset[0] | (rp->offset[1] << 8) |
+				    (rp->offset[2] << 16));
+
+	/* Record previous completed packets event */
+	conn->iso_tx.sync_pkt_time = conn->iso_tx.pkt_time;
+	conn->iso_tx.sync_pkt_sn = conn->iso_tx.pkt_sn;
+	conn->iso_tx.sync_pkt_queue = conn->iso_tx.pkt_queue;
+
+unlock:
+	hci_dev_unlock(hdev);
+	return rp->status;
+}
+
 static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 				   struct sk_buff *skb)
 {
@@ -4146,6 +4182,8 @@ static const struct hci_cc {
 	HCI_CC_STATUS(HCI_OP_LE_SET_PRIVACY_MODE, hci_cc_le_set_privacy_mode),
 	HCI_CC(HCI_OP_LE_READ_BUFFER_SIZE_V2, hci_cc_le_read_buffer_size_v2,
 	       sizeof(struct hci_rp_le_read_buffer_size_v2)),
+	HCI_CC(HCI_OP_LE_READ_ISO_TX_SYNC, hci_cc_le_read_iso_tx_sync,
+	       sizeof(struct hci_rp_le_read_iso_tx_sync)),
 	HCI_CC_VL(HCI_OP_LE_SET_CIG_PARAMS, hci_cc_le_set_cig_params,
 		  sizeof(struct hci_rp_le_set_cig_params), HCI_MAX_EVENT_SIZE),
 	HCI_CC(HCI_OP_LE_SETUP_ISO_PATH, hci_cc_le_setup_iso_path,
@@ -4425,6 +4463,9 @@ static void hci_num_comp_pkts_evt(struct hci_dev *hdev, void *data,
 			break;
 
 		case ISO_LINK:
+			conn->iso_tx.pkt_time = ktime_get();
+			conn->iso_tx.pkt_sn = conn->iso_tx.sent_sn;
+			conn->iso_tx.pkt_queue = conn->sent;
 			if (hdev->iso_pkts) {
 				hdev->iso_cnt += count;
 				if (hdev->iso_cnt > hdev->iso_pkts)
@@ -6836,6 +6877,8 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 		goto unlock;
 	}
 
+	memset(&conn->iso_tx, 0, sizeof(conn->iso_tx));
+
 	hci_connect_cfm(conn, ev->status);
 	hci_conn_del(conn);
 
@@ -6994,6 +7037,8 @@ static void hci_le_big_sync_established_evt(struct hci_dev *hdev, void *data,
 		/* Convert ISO Interval (1.25 ms slots) to latency (ms) */
 		bis->iso_qos.in.latency = le16_to_cpu(ev->interval) * 125 / 100;
 		bis->iso_qos.in.sdu = le16_to_cpu(ev->max_pdu);
+
+		memset(&bis->iso_tx, 0, sizeof(bis->iso_tx));
 
 		hci_connect_cfm(bis, ev->status);
 	}
