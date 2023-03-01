@@ -260,6 +260,16 @@ struct adv_info {
 	struct delayed_work	rpa_expired_cb;
 };
 
+struct iso_tx {
+	ktime_t	pkt_time;
+	__u16	pkt_sn;
+	__u16	pkt_queue;
+	__u32	sync_timestamp;
+	__u32	sync_offset;
+	__u16	sync_sn;
+	__u16	sent_sn;
+};
+
 #define HCI_MAX_ADV_INSTANCES		5
 #define HCI_DEFAULT_ADV_DURATION	2
 
@@ -730,6 +740,7 @@ struct hci_conn {
 	__s8		tx_power;
 	__s8		max_tx_power;
 	struct bt_iso_qos iso_qos;
+	struct iso_tx   iso_tx;
 	unsigned long	flags;
 
 	enum conn_reasons conn_reason;

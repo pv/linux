@@ -422,6 +422,9 @@ static int iso_send_frame(struct sock *sk, struct sk_buff *skb)
 
 	len = skb->len;
 
+	bt_cb(skb)->iso.sn = conn->tx_sn;
+	bt_cb(skb)->iso.status = 1;
+
 	/* Push ISO data header */
 	hdr = skb_push(skb, HCI_ISO_DATA_HDR_SIZE);
 	hdr->sn = cpu_to_le16(conn->tx_sn++);

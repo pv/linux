@@ -1628,6 +1628,20 @@ int hci_remove_ext_adv_instance(struct hci_dev *hdev, u8 instance)
 	return hci_cmd_sync_queue(hdev, remove_ext_adv_sync, adv, NULL);
 }
 
+int hci_le_read_iso_tx_sync_sync(struct hci_dev *hdev, __le16 handle)
+{
+	struct hci_cp_le_read_iso_tx_sync cp;
+
+	if (!(hdev->commands[41] & 0x40))
+		return 0;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.handle = handle;
+
+	return __hci_cmd_sync_status(hdev, HCI_OP_LE_READ_ISO_TX_SYNC,
+				     sizeof(cp), &cp, HCI_CMD_TIMEOUT);
+}
+
 int hci_le_terminate_big_sync(struct hci_dev *hdev, u8 handle, u8 reason)
 {
 	struct hci_cp_le_term_big cp;
