@@ -412,7 +412,7 @@ static int iso_send_frame(struct sock *sk, struct sk_buff *skb)
 {
 	struct iso_conn *conn = iso_pi(sk)->conn;
 	struct bt_iso_qos *qos = iso_sock_get_qos(sk);
-	struct hci_iso_data_hdr *hdr;
+	u16 slen;
 	int len = 0;
 
 	BT_DBG("sk %p len %d", sk, skb->len);
@@ -422,11 +422,31 @@ static int iso_send_frame(struct sock *sk, struct sk_buff *skb)
 
 	len = skb->len;
 
+	if (!bt_cb(skb)->iso.status) {
+		/* No user-provided sn & timestamp */
+		bt_cb(skb)->iso.status = 1;
+		bt_cb(skb)->iso.sn = conn->tx_sn++;
+		bt_cb(skb)->iso.ts = 0;
+		bt_cb(skb)->iso.timestamp = 0;
+	}
+
 	/* Push ISO data header */
-	hdr = skb_push(skb, HCI_ISO_DATA_HDR_SIZE);
-	hdr->sn = cpu_to_le16(conn->tx_sn++);
-	hdr->slen = cpu_to_le16(hci_iso_data_len_pack(len,
-						      HCI_ISO_STATUS_VALID));
+	slen = hci_iso_data_len_pack(len, HCI_ISO_STATUS_VALID);
+
+	if (bt_cb(skb)->iso.ts) {
+		struct hci_iso_ts_data_hdr *hdr;
+
+		hdr = skb_push(skb, HCI_ISO_TS_DATA_HDR_SIZE);
+		hdr->ts = cpu_to_le32(bt_cb(skb)->iso.timestamp);
+		hdr->sn = cpu_to_le16(bt_cb(skb)->iso.sn);
+		hdr->slen = cpu_to_le16(slen);
+	} else {
+		struct hci_iso_data_hdr *hdr;
+
+		hdr = skb_push(skb, HCI_ISO_DATA_HDR_SIZE);
+		hdr->sn = cpu_to_le16(bt_cb(skb)->iso.sn);
+		hdr->slen = cpu_to_le16(slen);
+	}
 
 	if (sk->sk_state == BT_CONNECTED)
 		hci_send_iso(conn->hcon, skb);
@@ -1053,6 +1073,44 @@ static int iso_sock_getname(struct socket *sock, struct sockaddr *addr,
 	return sizeof(struct sockaddr_iso);
 }
 
+static int iso_cmsg_parse(struct cmsghdr *cmsg,
+			  struct bt_iso_pkt_status *pkt_status)
+{
+	switch (cmsg->cmsg_type) {
+	case BT_SCM_PKT_STATUS:
+		if (cmsg->cmsg_len != CMSG_LEN(sizeof(*pkt_status)))
+			return -EINVAL;
+
+		memcpy(pkt_status, CMSG_DATA(cmsg), sizeof(*pkt_status));
+		pkt_status->status = 1;
+		return 0;
+
+	default:
+		return -EINVAL;
+	}
+}
+
+static int iso_cmsg_send(struct sock *sk, struct msghdr *msg,
+			 struct bt_iso_pkt_status *pkt_status)
+{
+	struct cmsghdr *cmsg;
+	int err;
+
+	for_each_cmsghdr(cmsg, msg) {
+		if (!CMSG_OK(msg, cmsg))
+			return -EINVAL;
+
+		if (cmsg->cmsg_level != SOL_BLUETOOTH)
+			continue;
+
+		err = iso_cmsg_parse(cmsg, pkt_status);
+		if (err < 0)
+			return err;
+	}
+
+	return 0;
+}
+
 static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 			    size_t len)
 {
@@ -1079,6 +1137,27 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 		return PTR_ERR(skb);
 
 	len -= skb->len;
+
+	bt_cb(skb)->iso.status = 0;
+
+	if (msg->msg_controllen) {
+		struct bt_iso_pkt_status pkt_status;
+
+		memset(&pkt_status, 0, sizeof(pkt_status));
+
+		err = iso_cmsg_send(sk, msg, &pkt_status);
+		if (err < 0) {
+			kfree_skb(skb);
+			return err;
+		}
+
+		if (pkt_status.status) {
+			bt_cb(skb)->iso.status = 1;
+			bt_cb(skb)->iso.ts = pkt_status.ts;
+			bt_cb(skb)->iso.sn = pkt_status.sn;
+			bt_cb(skb)->iso.timestamp = pkt_status.timestamp;
+		}
+	}
 
 	BT_DBG("skb %p len %d", sk, skb->len);
 
