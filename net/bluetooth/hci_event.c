@@ -4254,6 +4254,8 @@ static void hci_cs_le_create_cis(struct hci_dev *hdev, u8 status)
 		}
 	}
 
+	hci_le_create_cis_pending(hdev);
+
 	hci_dev_unlock(hdev);
 }
 
