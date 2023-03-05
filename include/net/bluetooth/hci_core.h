@@ -1181,10 +1181,15 @@ static inline struct hci_conn *hci_conn_hash_lookup_le(struct hci_dev *hdev,
 
 static inline struct hci_conn *hci_conn_hash_lookup_cis(struct hci_dev *hdev,
 							bdaddr_t *ba,
-							__u8 ba_type)
+							__u8 ba_type,
+							__u8 cig,
+							__u8 cis)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	if (cig == BT_ISO_QOS_CIG_UNSET || cis == BT_ISO_QOS_CIS_UNSET)
+		return NULL;
 
 	rcu_read_lock();
 
@@ -1192,10 +1197,14 @@ static inline struct hci_conn *hci_conn_hash_lookup_cis(struct hci_dev *hdev,
 		if (c->type != ISO_LINK)
 			continue;
 
-		if (ba_type == c->dst_type && !bacmp(&c->dst, ba)) {
-			rcu_read_unlock();
-			return c;
-		}
+		if (ba_type != c->dst_type || bacmp(&c->dst, ba))
+			continue;
+
+		if (c->iso_qos.cig != cig || c->iso_qos.cis != cis)
+			continue;
+
+		rcu_read_unlock();
+		return c;
 	}
 
 	rcu_read_unlock();
