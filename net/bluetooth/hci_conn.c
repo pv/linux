@@ -1885,7 +1885,8 @@ static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 		struct hci_cis *cis = &cmd.cis[cmd.cp.num_cis];
 
 		if (conn == data || conn->type != ISO_LINK ||
-		    conn->state == BT_CONNECTED || conn->iso_qos.cig != cig)
+		    conn->state == BT_CONNECTED || conn->state == BT_BOUND ||
+		    conn->iso_qos.cig != cig)
 			continue;
 
 		/* Check if all CIS(s) belonging to a CIG are ready */
@@ -1914,6 +1915,8 @@ static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 	rcu_read_unlock();
 
 	hci_dev_unlock(hdev);
+
+	bt_dev_info(hdev, "hci_create_cis_sync: %d", (int)cmd.cp.num_cis);
 
 	if (!cmd.cp.num_cis)
 		return 0;
@@ -2163,8 +2166,13 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 					 BT_SECURITY_LOW,
 					 HCI_LE_CONN_TIMEOUT,
 					 CONN_REASON_ISO_CONNECT);
-	if (IS_ERR(le))
+	if (IS_ERR(le)) {
+		bt_dev_err(hdev, "hci_connect_le in hci_connect_cis: %d",
+			(int)PTR_ERR(le));
 		return le;
+	}
+
+	bt_dev_info(hdev, "hci_connect_cis: LE connect ok");
 
 	hci_iso_qos_setup(hdev, le, &qos->out,
 			  le->le_tx_phy ? le->le_tx_phy : hdev->le_tx_def_phys);
