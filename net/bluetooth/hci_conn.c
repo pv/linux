@@ -1873,69 +1873,102 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 
 static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 {
-	struct {
+	struct _packed {
 		struct hci_cp_le_create_cis cp;
-		struct hci_cis cis[0x1f];
+		struct hci_cis cis[1];
 	} cmd;
 	struct hci_conn *conn = data;
-	u8 cig;
+	int err;
+
+	/* The spec allows only one pending LE Create CIS command at a time.  In
+	 * case the command is pending now, we postpone this operation until the
+	 * CIS established event from the previous command has been received.
+	 *
+	 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
+	 * page 2566:
+	 *
+	 * If the Host issues this command before all the
+	 * HCI_LE_CIS_Established events from the previous use of the
+	 * command have been generated, the Controller shall return the
+	 * error code Command Disallowed (0x0C).
+	 *
+	 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
+	 * page 2567:
+	 *
+	 * When the Controller receives the HCI_LE_Create_CIS command, the
+	 * Controller sends the HCI_Command_Status event to the Host. An
+	 * HCI_LE_CIS_Established event will be generated for each CIS when it
+	 * is established or if it is disconnected or considered lost before
+	 * being established; until all the events are generated, the command
+	 * remains pending.
+	 */
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.cis[0].acl_handle = cpu_to_le16(conn->link->handle);
 	cmd.cis[0].cis_handle = cpu_to_le16(conn->handle);
 	cmd.cp.num_cis++;
-	cig = conn->iso_qos.cig;
 
-	hci_dev_lock(hdev);
+	if (hci_dev_test_and_set_flag(hdev, HCI_CREATE_CIS))
+		return 0;
 
+	err = hci_send_cmd(hdev, HCI_OP_LE_CREATE_CIS, sizeof(cmd.cp) +
+			    sizeof(cmd.cis[0]) * cmd.cp.num_cis, &cmd);
+	if (err)
+		hci_dev_clear_flag(hdev, HCI_CREATE_CIS);
+
+	return err;
+}
+
+static void create_cis_complete(struct hci_dev *hdev, void *data, int err)
+{
+	struct hci_conn *conn = data;
+
+	bt_dev_dbg(hdev, "conn %p", conn);
+
+	if (err) {
+		bt_dev_err(hdev, "Unable to create CIS: %d", err);
+		hci_connect_cfm(conn, err);
+		hci_conn_del(conn);
+
+		hci_le_create_cis_pending(hdev);
+	}
+}
+
+void hci_le_create_cis_pending(struct hci_dev *hdev)
+{
+	struct hci_conn *conn;
+
+again:
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
-		struct hci_cis *cis = &cmd.cis[cmd.cp.num_cis];
+		int err;
 
-		if (conn == data || conn->type != ISO_LINK ||
-		    conn->state == BT_CONNECTED || conn->iso_qos.cig != cig)
+		if (conn->type != ISO_LINK || conn->state != BT_CONNECT ||
+		    !conn->link || conn->link->state != BT_CONNECTED)
 			continue;
 
-		/* Check if all CIS(s) belonging to a CIG are ready */
-		if (!conn->link || conn->link->state != BT_CONNECTED ||
-		    conn->state != BT_CONNECT) {
-			cmd.cp.num_cis = 0;
-			break;
-		}
+		rcu_read_unlock();
 
-		/* Group all CIS with state BT_CONNECT since the spec don't
-		 * allow to send them individually:
-		 *
-		 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
-		 * page 2566:
-		 *
-		 * If the Host issues this command before all the
-		 * HCI_LE_CIS_Established events from the previous use of the
-		 * command have been generated, the Controller shall return the
-		 * error code Command Disallowed (0x0C).
-		 */
-		cis->acl_handle = cpu_to_le16(conn->link->handle);
-		cis->cis_handle = cpu_to_le16(conn->handle);
-		cmd.cp.num_cis++;
+		/* Queue Create CIS */
+		err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, conn,
+					 create_cis_complete);
+		if (err) {
+			bt_dev_err(hdev, "Unable to create CIS: %d", err);
+			hci_connect_cfm(conn, err);
+			hci_conn_del(conn);
+			goto again;
+		}
+		return;
 	}
 
 	rcu_read_unlock();
-
-	hci_dev_unlock(hdev);
-
-	if (!cmd.cp.num_cis)
-		return 0;
-
-	return hci_send_cmd(hdev, HCI_OP_LE_CREATE_CIS, sizeof(cmd.cp) +
-			    sizeof(cmd.cis[0]) * cmd.cp.num_cis, &cmd);
 }
 
 int hci_le_create_cis(struct hci_conn *conn)
 {
 	struct hci_conn *cis;
 	struct hci_dev *hdev = conn->hdev;
-	int err;
 
 	switch (conn->type) {
 	case LE_LINK:
@@ -1953,12 +1986,9 @@ int hci_le_create_cis(struct hci_conn *conn)
 	if (cis->state == BT_CONNECT)
 		return 0;
 
-	/* Queue Create CIS */
-	err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, cis, NULL);
-	if (err)
-		return err;
-
 	cis->state = BT_CONNECT;
+
+	hci_le_create_cis_pending(hdev);
 
 	return 0;
 }
