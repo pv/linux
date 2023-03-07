@@ -959,6 +959,7 @@ enum {
 	HCI_CONN_SCANNING,
 	HCI_CONN_AUTH_FAILURE,
 	HCI_CONN_PER_ADV,
+	HCI_CONN_CREATE_CIS,
 };
 
 static inline bool hci_conn_ssp_enabled(struct hci_conn *conn)
@@ -1299,6 +1300,7 @@ bool hci_setup_sync(struct hci_conn *conn, __u16 handle);
 void hci_sco_setup(struct hci_conn *conn, __u8 status);
 bool hci_iso_setup_path(struct hci_conn *conn);
 int hci_le_create_cis(struct hci_conn *conn);
+void hci_le_create_cis_pending(struct hci_dev *hdev);
 
 struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 			      u8 role);

@@ -6801,14 +6801,16 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 		bt_dev_err(hdev,
 			   "Unable to find connection with handle 0x%4.4x",
 			   handle);
-		goto unlock;
+		goto done;
 	}
+
+	clear_bit(HCI_CONN_CREATE_CIS, &conn->flags);
 
 	if (conn->type != ISO_LINK) {
 		bt_dev_err(hdev,
 			   "Invalid connection link type handle 0x%4.4x",
 			   handle);
-		goto unlock;
+		goto done;
 	}
 
 	if (conn->role == HCI_ROLE_SLAVE) {
@@ -6833,13 +6835,15 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 		hci_debugfs_create_conn(conn);
 		hci_conn_add_sysfs(conn);
 		hci_iso_setup_path(conn);
-		goto unlock;
+		goto done;
 	}
 
 	hci_connect_cfm(conn, ev->status);
 	hci_conn_del(conn);
 
-unlock:
+done:
+	hci_le_create_cis_pending(hdev);
+
 	hci_dev_unlock(hdev);
 }
 
