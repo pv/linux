@@ -3820,7 +3820,8 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 {
 	struct hci_rp_le_set_cig_params *rp = data;
 	struct hci_conn *conn;
-	int i = 0;
+	struct cig_list *cig;
+	int i;
 
 	bt_dev_dbg(hdev, "status 0x%2.2x", rp->status);
 
@@ -3835,30 +3836,14 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 		goto unlock;
 	}
 
-	rcu_read_lock();
+	cig = hci_cig_list_find(&hdev->central_cig_list, rp->cig_id);
+	if (!cig || rp->num_handles != cig->num_cis)
+		goto unlock;
 
-	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
-		if (conn->type != ISO_LINK || conn->iso_qos.cig != rp->cig_id ||
-		    conn->state == BT_CONNECTED)
-			continue;
+	for (i = 0; i < cig->num_cis; ++i)
+		cig->handles[i] = rp->handle[i];
 
-		conn->handle = __le16_to_cpu(rp->handle[i++]);
-
-		bt_dev_dbg(hdev, "%p handle 0x%4.4x link %p", conn,
-			   conn->handle, conn->link);
-
-		/* Create CIS if LE is already connected */
-		if (conn->link && conn->link->state == BT_CONNECTED) {
-			rcu_read_unlock();
-			hci_le_create_cis(conn->link);
-			rcu_read_lock();
-		}
-
-		if (i == rp->num_handles)
-			break;
-	}
-
-	rcu_read_unlock();
+	hci_le_create_cis_pending(hdev);
 
 unlock:
 	hci_dev_unlock(hdev);
@@ -4253,6 +4238,8 @@ static void hci_cs_le_create_cis(struct hci_dev *hdev, u8 status)
 			hci_conn_del(conn);
 		}
 	}
+
+	hci_le_create_cis_pending(hdev);
 
 	hci_dev_unlock(hdev);
 }
@@ -6791,6 +6778,7 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 	struct hci_evt_le_cis_established *ev = data;
 	struct hci_conn *conn;
 	u16 handle = __le16_to_cpu(ev->handle);
+	bool pending = false;
 
 	bt_dev_dbg(hdev, "status 0x%2.2x", ev->status);
 
@@ -6801,15 +6789,17 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 		bt_dev_err(hdev,
 			   "Unable to find connection with handle 0x%4.4x",
 			   handle);
-		goto unlock;
+		goto done;
 	}
 
 	if (conn->type != ISO_LINK) {
 		bt_dev_err(hdev,
 			   "Invalid connection link type handle 0x%4.4x",
 			   handle);
-		goto unlock;
+		goto done;
 	}
+
+	pending = test_and_clear_bit(HCI_CONN_CREATE_CIS, &conn->flags);
 
 	if (conn->role == HCI_ROLE_SLAVE) {
 		__le32 interval;
@@ -6833,13 +6823,16 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 		hci_debugfs_create_conn(conn);
 		hci_conn_add_sysfs(conn);
 		hci_iso_setup_path(conn);
-		goto unlock;
+		goto done;
 	}
 
 	hci_connect_cfm(conn, ev->status);
 	hci_conn_del(conn);
 
-unlock:
+done:
+	if (pending)
+		hci_le_create_cis_pending(hdev);
+
 	hci_dev_unlock(hdev);
 }
 
