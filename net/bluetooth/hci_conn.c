@@ -762,11 +762,54 @@ struct iso_list_data {
 		u16 sync_handle;
 	};
 	int count;
-	struct {
-		struct hci_cp_le_set_cig_params cp;
-		struct hci_cis_params cis[0x11];
-	} pdu;
 };
+
+void hci_cig_list_clear(struct list_head *cig_list)
+{
+	struct cig_list *c, *n;
+
+	list_for_each_entry_safe(c, n, cig_list, list) {
+		list_del(&c->list);
+		kfree(c);
+	}
+}
+
+struct cig_list *hci_cig_list_find(struct list_head *cig_list, u8 cig)
+{
+	struct cig_list *c;
+
+	list_for_each_entry(c, cig_list, list) {
+		if (c->cig == cig)
+			return c;
+	}
+
+	return NULL;
+}
+
+static struct cig_list *hci_cig_list_add(struct list_head *cig_list, u8 cig)
+{
+	struct cig_list *entry;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return ERR_PTR(-ENOMEM);
+
+	entry->cig = cig;
+	list_add(&entry->list, cig_list);
+
+	return entry;
+}
+
+static void hci_cig_list_del(struct list_head *cig_list, u8 cig)
+{
+	struct cig_list *entry;
+
+	entry = hci_cig_list_find(cig_list, cig);
+	if (entry) {
+		list_del(&entry->list);
+		kfree(entry);
+	}
+}
 
 static void bis_list(struct hci_conn *conn, void *data)
 {
@@ -916,6 +959,8 @@ static int hci_le_remove_cig(struct hci_dev *hdev, u8 handle)
 {
 	bt_dev_dbg(hdev, "handle 0x%2.2x", handle);
 
+	hci_cig_list_del(&hdev->central_cig_list, handle);
+
 	return hci_cmd_sync_queue(hdev, remove_cig_sync, ERR_PTR(handle), NULL);
 }
 
@@ -927,12 +972,15 @@ static void find_cis(struct hci_conn *conn, void *data)
 	if (!bacmp(&conn->dst, BDADDR_ANY))
 		return;
 
+	if (conn->iso_qos.cig != d->cig)
+		return;
+
 	d->count++;
 }
 
 /* Cleanup CIS connection:
  *
- * Detects if there any CIS left connected in a CIG and remove it.
+ * Detects if CIG is unused and remove it.
  */
 static void cis_cleanup(struct hci_conn *conn)
 {
@@ -942,9 +990,9 @@ static void cis_cleanup(struct hci_conn *conn)
 	memset(&d, 0, sizeof(d));
 	d.cig = conn->iso_qos.cig;
 
-	/* Check if ISO connection is a CIS and remove CIG if there are
-	 * no other connections using it.
-	 */
+	/* Remove CIG if there are no other CIS connections using it. */
+	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_BOUND, &d);
+	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECT, &d);
 	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECTED, &d);
 	if (d.count)
 		return;
@@ -1049,6 +1097,41 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	return conn;
 }
 
+static void detach_iso(struct hci_conn *conn)
+{
+	struct hci_dev *hdev = conn->hdev;
+	struct hci_conn *iso;
+
+again:
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(iso, &hdev->conn_hash.list, list) {
+		if (iso->type != ISO_LINK || iso->link != conn)
+			continue;
+
+		iso->link = NULL;
+
+		/* Indicate connection failure for linked pending Central CIS
+		 * connections. If we had sent LE Create CIS, cleanup shall be
+		 * done elsewhere; either that command fails and we handle it
+		 * or controller sends LE CIS Established indicating failure
+		 * (Core v5.3 Vol 4 Part E 7.8.99 page 2567).
+		 */
+		if (iso->state != BT_CONNECT || iso->role != HCI_ROLE_MASTER ||
+		    !bacmp(&iso->dst, BDADDR_ANY) ||
+		    test_bit(HCI_CONN_CREATE_CIS, &iso->flags))
+			continue;
+
+		rcu_read_unlock();
+
+		hci_connect_cfm(iso, HCI_ERROR_LOCAL_HOST_TERM);
+		hci_conn_del(iso);
+		goto again;
+	}
+
+	rcu_read_unlock();
+}
+
 int hci_conn_del(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
@@ -1068,6 +1151,9 @@ int hci_conn_del(struct hci_conn *conn)
 		hdev->acl_cnt += conn->sent;
 	} else if (conn->type == LE_LINK) {
 		cancel_delayed_work(&conn->le_conn_timeout);
+
+		/* If ACL disconnected first, clean up attached ISO */
+		detach_iso(conn);
 
 		if (hdev->le_pkts)
 			hdev->le_cnt += conn->sent;
@@ -1627,42 +1713,6 @@ struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	return sco;
 }
 
-static void cis_add(struct iso_list_data *d, struct bt_iso_qos *qos)
-{
-	struct hci_cis_params *cis = &d->pdu.cis[d->pdu.cp.num_cis];
-
-	cis->cis_id = qos->cis;
-	cis->c_sdu  = cpu_to_le16(qos->out.sdu);
-	cis->p_sdu  = cpu_to_le16(qos->in.sdu);
-	cis->c_phy  = qos->out.phy ? qos->out.phy : qos->in.phy;
-	cis->p_phy  = qos->in.phy ? qos->in.phy : qos->out.phy;
-	cis->c_rtn  = qos->out.rtn;
-	cis->p_rtn  = qos->in.rtn;
-
-	d->pdu.cp.num_cis++;
-}
-
-static void cis_list(struct hci_conn *conn, void *data)
-{
-	struct iso_list_data *d = data;
-
-	/* Skip if broadcast/ANY address */
-	if (!bacmp(&conn->dst, BDADDR_ANY))
-		return;
-
-	if (d->cig != conn->iso_qos.cig || d->cis == BT_ISO_QOS_CIS_UNSET ||
-	    d->cis != conn->iso_qos.cis)
-		return;
-
-	d->count++;
-
-	if (d->pdu.cp.cig_id == BT_ISO_QOS_CIG_UNSET ||
-	    d->count >= ARRAY_SIZE(d->pdu.cis))
-		return;
-
-	cis_add(d, &conn->iso_qos);
-}
-
 static int hci_le_create_big(struct hci_conn *conn, struct bt_iso_qos *qos)
 {
 	struct hci_dev *hdev = conn->hdev;
@@ -1686,95 +1736,166 @@ static int hci_le_create_big(struct hci_conn *conn, struct bt_iso_qos *qos)
 	return hci_send_cmd(hdev, HCI_OP_LE_CREATE_BIG, sizeof(cp), &cp);
 }
 
-static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
+static int hci_le_set_cig_params(struct hci_dev *hdev, struct cig_list *entry)
 {
-	struct hci_dev *hdev = conn->hdev;
-	struct iso_list_data data;
+	struct {
+		struct hci_cp_le_set_cig_params cp;
+		struct hci_cis_params cis[ARRAY_SIZE(entry->qos)];
+	} pdu;
+	struct bt_iso_qos *qos;
+	int i;
 
-	memset(&data, 0, sizeof(data));
+	if (!entry->num_cis)
+		return 0;
 
-	/* Allocate a CIG if not set */
-	if (qos->cig == BT_ISO_QOS_CIG_UNSET) {
-		for (data.cig = 0x00; data.cig < 0xff; data.cig++) {
-			data.count = 0;
-			data.cis = 0xff;
+	memset(&pdu, 0, sizeof(pdu));
 
-			hci_conn_hash_list_state(hdev, cis_list, ISO_LINK,
-						 BT_BOUND, &data);
-			if (data.count)
-				continue;
+	qos = &entry->qos[0];
 
-			hci_conn_hash_list_state(hdev, cis_list, ISO_LINK,
-						 BT_CONNECTED, &data);
-			if (!data.count)
+	pdu.cp.cig_id = qos->cig;
+	hci_cpu_to_le24(qos->out.interval, pdu.cp.c_interval);
+	hci_cpu_to_le24(qos->in.interval, pdu.cp.p_interval);
+	pdu.cp.sca = qos->sca;
+	pdu.cp.packing = qos->packing;
+	pdu.cp.framing = qos->framing;
+	pdu.cp.c_latency = cpu_to_le16(qos->out.latency);
+	pdu.cp.p_latency = cpu_to_le16(qos->in.latency);
+	pdu.cp.num_cis = entry->num_cis;
+
+	for (i = 0; i < entry->num_cis; ++i) {
+		struct hci_cis_params *cis = &pdu.cis[i];
+
+		qos = &entry->qos[i];
+		cis->cis_id = qos->cis;
+		cis->c_sdu  = cpu_to_le16(qos->out.sdu);
+		cis->p_sdu  = cpu_to_le16(qos->in.sdu);
+		cis->c_phy  = qos->out.phy ? qos->out.phy : qos->in.phy;
+		cis->p_phy  = qos->in.phy ? qos->in.phy : qos->out.phy;
+		cis->c_rtn  = qos->out.rtn;
+		cis->p_rtn  = qos->in.rtn;
+	}
+
+	return hci_send_cmd(hdev, HCI_OP_LE_SET_CIG_PARAMS,
+			    sizeof(pdu.cp) +
+			    (pdu.cp.num_cis * sizeof(*pdu.cis)),
+			    &pdu);
+}
+
+static int allocate_cis(struct cig_list *entry, u8 *cis)
+{
+	const u8 max_cis = ARRAY_SIZE(entry->qos);
+	u8 c;
+	int i;
+
+	if (*cis == BT_ISO_QOS_CIS_UNSET) {
+		/* Allocate new CIS id */
+		for (c = 0x00; c <= 0xef; ++c) {
+			for (i = 0; i < entry->num_cis; ++i)
+				if (entry->qos[i].cis == c)
+					break;
+			if (i == entry->num_cis)
 				break;
 		}
+		if (c > 0xef)
+			return -ENOSPC;
+	} else {
+		/* Find existing CIS id */
+		c = *cis;
+		if (c > 0xef)
+			return -EINVAL;
 
-		if (data.cig == 0xff)
-			return false;
-
-		/* Update CIG */
-		qos->cig = data.cig;
+		for (i = 0; i < entry->num_cis; ++i)
+			if (entry->qos[i].cis == c)
+				break;
 	}
 
-	data.pdu.cp.cig_id = qos->cig;
-	hci_cpu_to_le24(qos->out.interval, data.pdu.cp.c_interval);
-	hci_cpu_to_le24(qos->in.interval, data.pdu.cp.p_interval);
-	data.pdu.cp.sca = qos->sca;
-	data.pdu.cp.packing = qos->packing;
-	data.pdu.cp.framing = qos->framing;
-	data.pdu.cp.c_latency = cpu_to_le16(qos->out.latency);
-	data.pdu.cp.p_latency = cpu_to_le16(qos->in.latency);
+	if (i >= max_cis)
+		return -ENOSPC;
 
-	if (qos->cis != BT_ISO_QOS_CIS_UNSET) {
-		data.count = 0;
-		data.cig = qos->cig;
-		data.cis = qos->cis;
+	*cis = c;
+	return i;
+}
 
-		hci_conn_hash_list_state(hdev, cis_list, ISO_LINK, BT_BOUND,
-					 &data);
-		if (data.count)
-			return false;
+static int hci_set_cis_params(struct hci_dev *hdev, struct bt_iso_qos *qos)
+{
+	struct cig_list *entry;
+	u8 cig, cis;
+	int i;
 
-		cis_add(&data, qos);
-	}
+	cis = qos->cis;
+	cig = qos->cig;
 
-	/* Reprogram all CIS(s) with the same CIG */
-	for (data.cig = qos->cig, data.cis = 0x00; data.cis < 0x11;
-	     data.cis++) {
-		data.count = 0;
-
-		hci_conn_hash_list_state(hdev, cis_list, ISO_LINK, BT_BOUND,
-					 &data);
-		if (data.count)
-			continue;
-
-		/* Allocate a CIS if not set */
-		if (qos->cis == BT_ISO_QOS_CIS_UNSET) {
-			/* Update CIS */
-			qos->cis = data.cis;
-			cis_add(&data, qos);
+	/* Allocate a CIG if not set. Valid CIG and CIS ids are in range 0x00 to
+	 * 0xef.  (Core 5.3, Vol 4, Part E, 7.8.97).
+	 */
+	if (cig == BT_ISO_QOS_CIG_UNSET) {
+		/* Prefer to use existing reconfigurable CIG */
+		list_for_each_entry(entry, &hdev->central_cig_list, list) {
+			if (entry->active)
+				continue;
+			i = allocate_cis(entry, &cis);
+			if (i >= 0) {
+				cig = entry->cig;
+				goto done;
+			}
 		}
+
+		for (cig = 0x00; cig < 0xf0; cig++)
+			if (!hci_cig_list_find(&hdev->central_cig_list, cig))
+				break;
+		if (cig == 0xf0)
+			return -ENOSPC;
+
+		entry = hci_cig_list_add(&hdev->central_cig_list, cig);
+	} else {
+		if (cig > 0xef)
+			return -EINVAL;
+
+		entry = hci_cig_list_find(&hdev->central_cig_list, cig);
+		if (!entry)
+			entry = hci_cig_list_add(&hdev->central_cig_list, cig);
 	}
 
-	if (qos->cis == BT_ISO_QOS_CIS_UNSET || !data.pdu.cp.num_cis)
-		return false;
+	if (IS_ERR(entry))
+		return PTR_ERR(entry);
 
-	if (hci_send_cmd(hdev, HCI_OP_LE_SET_CIG_PARAMS,
-			 sizeof(data.pdu.cp) +
-			 (data.pdu.cp.num_cis * sizeof(*data.pdu.cis)),
-			 &data.pdu) < 0)
-		return false;
+	i = allocate_cis(entry, &cis);
+	if (i < 0)
+		return i;
 
-	return true;
+done:
+	/* Modify or add the CIS configuration. We do not allow removing
+	 * configurations, as LE Set CIG Parameters only adds or modifies them.
+	 * (Core 5.3, Vol 4, Part E, 7.8.97)
+	 */
+	qos->cis = cis;
+	qos->cig = cig;
+
+	/* Check if no change is needed */
+	if (i < entry->num_cis && !memcmp(&entry->qos[i], qos, sizeof(*qos)))
+		return 0;
+
+	/* Check if CIG can be reconfigured now */
+	if (entry->active)
+		return -EBUSY;
+
+	if (i == entry->num_cis) {
+		entry->handles[i] = HCI_CONN_HANDLE_UNSET;
+		++entry->num_cis;
+	}
+
+	entry->qos[i] = *qos;
+
+	return hci_le_set_cig_params(hdev, entry);
 }
 
 struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 			      __u8 dst_type, struct bt_iso_qos *qos)
 {
 	struct hci_conn *cis;
+	int err;
 
-	cis = hci_conn_hash_lookup_cis(hdev, dst, dst_type);
+	cis = hci_conn_hash_lookup_cis(hdev, dst, dst_type, qos->cig, qos->cis);
 	if (!cis) {
 		cis = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
 		if (!cis)
@@ -1783,17 +1904,9 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		cis->dst_type = dst_type;
 	}
 
-	if (cis->state == BT_CONNECTED)
-		return cis;
-
-	/* Check if CIS has been set and the settings matches */
-	if (cis->state == BT_BOUND &&
-	    !memcmp(&cis->iso_qos, qos, sizeof(*qos)))
-		return cis;
-
-	/* Update LINK PHYs according to QoS preference */
-	cis->le_tx_phy = qos->out.phy;
-	cis->le_rx_phy = qos->in.phy;
+	/* Check configurable state */
+	if (cis->state == BT_CONNECT || cis->state == BT_CONNECTED)
+		return ERR_PTR(-EBUSY);
 
 	/* If output interval is not set use the input interval as it cannot be
 	 * 0x000000.
@@ -1819,10 +1932,15 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 	if (!qos->in.latency)
 		qos->in.latency = qos->out.latency;
 
-	if (!hci_le_set_cig_params(cis, qos)) {
+	err = hci_set_cis_params(cis->hdev, qos);
+	if (err) {
 		hci_conn_drop(cis);
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(err);
 	}
+
+	/* Update LINK PHYs according to QoS preference */
+	cis->le_tx_phy = qos->out.phy;
+	cis->le_rx_phy = qos->in.phy;
 
 	cis->iso_qos = *qos;
 	cis->state = BT_BOUND;
@@ -1862,55 +1980,98 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 	return true;
 }
 
+static bool conn_is_pending_cis(struct hci_conn *conn)
+{
+	return conn->type == ISO_LINK && conn->role == HCI_ROLE_MASTER &&
+		conn->state == BT_CONNECT &&
+		conn->link && conn->link->state == BT_CONNECTED;
+}
+
+static void conn_update_cis_handle(struct hci_conn *conn)
+{
+	struct hci_dev *hdev = conn->hdev;
+	struct cig_list *cig;
+	int i;
+
+	if (conn->handle != HCI_CONN_HANDLE_UNSET)
+		return;
+
+	cig = hci_cig_list_find(&hdev->central_cig_list, conn->iso_qos.cig);
+	if (!cig)
+		return;
+
+	for (i = 0; i < cig->num_cis; ++i) {
+		if (cig->qos[i].cis == conn->iso_qos.cis) {
+			conn->handle = cig->handles[i];
+			return;
+		}
+	}
+}
+
 static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 {
 	struct {
 		struct hci_cp_le_create_cis cp;
 		struct hci_cis cis[0x1f];
 	} cmd;
-	struct hci_conn *conn = data;
-	u8 cig;
+	struct hci_conn *conn;
+
+	/* The spec allows only one pending LE Create CIS command at a time.  If
+	 * the command is pending now, we postpone until the CIS established
+	 * event from the previous commands has been received.  Similarly, we
+	 * retry after other events that can make pending connections ready.
+	 *
+	 * There's no restriction that the CIS given in the command have to be
+	 * in the same CIG, so we create them in any order.
+	 *
+	 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
+	 * page 2566:
+	 *
+	 * If the Host issues this command before all the
+	 * HCI_LE_CIS_Established events from the previous use of the
+	 * command have been generated, the Controller shall return the
+	 * error code Command Disallowed (0x0C).
+	 *
+	 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
+	 * page 2567:
+	 *
+	 * When the Controller receives the HCI_LE_Create_CIS command, the
+	 * Controller sends the HCI_Command_Status event to the Host. An
+	 * HCI_LE_CIS_Established event will be generated for each CIS when it
+	 * is established or if it is disconnected or considered lost before
+	 * being established; until all the events are generated, the command
+	 * remains pending.
+	 */
 
 	memset(&cmd, 0, sizeof(cmd));
-	cmd.cis[0].acl_handle = cpu_to_le16(conn->link->handle);
-	cmd.cis[0].cis_handle = cpu_to_le16(conn->handle);
-	cmd.cp.num_cis++;
-	cig = conn->iso_qos.cig;
 
 	hci_dev_lock(hdev);
 
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
-		struct hci_cis *cis = &cmd.cis[cmd.cp.num_cis];
-
-		if (conn == data || conn->type != ISO_LINK ||
-		    conn->state == BT_CONNECTED || conn->iso_qos.cig != cig)
-			continue;
-
-		/* Check if all CIS(s) belonging to a CIG are ready */
-		if (!conn->link || conn->link->state != BT_CONNECTED ||
-		    conn->state != BT_CONNECT) {
-			cmd.cp.num_cis = 0;
-			break;
-		}
-
-		/* Group all CIS with state BT_CONNECT since the spec don't
-		 * allow to send them individually:
-		 *
-		 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
-		 * page 2566:
-		 *
-		 * If the Host issues this command before all the
-		 * HCI_LE_CIS_Established events from the previous use of the
-		 * command have been generated, the Controller shall return the
-		 * error code Command Disallowed (0x0C).
-		 */
-		cis->acl_handle = cpu_to_le16(conn->link->handle);
-		cis->cis_handle = cpu_to_le16(conn->handle);
-		cmd.cp.num_cis++;
+		if (test_bit(HCI_CONN_CREATE_CIS, &conn->flags))
+			goto done;
 	}
 
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		struct hci_cis *cis_data = &cmd.cis[cmd.cp.num_cis];
+
+		if (!conn_is_pending_cis(conn))
+			continue;
+		if (conn->handle == HCI_CONN_HANDLE_UNSET)
+			continue;
+
+		set_bit(HCI_CONN_CREATE_CIS, &conn->flags);
+		cis_data->acl_handle = cpu_to_le16(conn->link->handle);
+		cis_data->cis_handle = cpu_to_le16(conn->handle);
+		cmd.cp.num_cis++;
+
+		if (cmd.cp.num_cis >= ARRAY_SIZE(cmd.cis))
+			break;
+	}
+
+done:
 	rcu_read_unlock();
 
 	hci_dev_unlock(hdev);
@@ -1922,36 +2083,78 @@ static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 			    sizeof(cmd.cis[0]) * cmd.cp.num_cis, &cmd);
 }
 
-int hci_le_create_cis(struct hci_conn *conn)
+static void fail_pending_cis(struct hci_dev *hdev, int err, bool created)
 {
-	struct hci_conn *cis;
-	struct hci_dev *hdev = conn->hdev;
-	int err;
+	struct hci_conn *conn;
 
-	switch (conn->type) {
-	case LE_LINK:
-		if (!conn->link || conn->state != BT_CONNECTED)
-			return -EINVAL;
-		cis = conn->link;
-		break;
-	case ISO_LINK:
-		cis = conn;
-		break;
-	default:
-		return -EINVAL;
+again:
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		if (created) {
+			if (!test_and_clear_bit(HCI_CONN_CREATE_CIS,
+						&conn->flags))
+				continue;
+		} else {
+			if (!conn_is_pending_cis(conn))
+				continue;
+		}
+
+		rcu_read_unlock();
+
+		bt_dev_err(hdev, "Unable to create CIS: %d", err);
+		conn->state = BT_CLOSED;
+		hci_connect_cfm(conn, err);
+		hci_conn_del(conn);
+
+		goto again;
 	}
 
-	if (cis->state == BT_CONNECT)
-		return 0;
+	rcu_read_unlock();
+}
 
-	/* Queue Create CIS */
-	err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, cis, NULL);
+static void create_cis_complete(struct hci_dev *hdev, void *data, int err)
+{
+	if (err) {
+		hci_dev_lock(hdev);
+		fail_pending_cis(hdev, err, true);
+		hci_le_create_cis_pending(hdev);
+		hci_dev_unlock(hdev);
+	}
+}
+
+void hci_le_create_cis_pending(struct hci_dev *hdev)
+{
+	struct hci_conn *conn;
+	int err;
+	bool pending = false;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		/* Command in progress: we will retry later */
+		if (test_bit(HCI_CONN_CREATE_CIS, &conn->flags)) {
+			rcu_read_unlock();
+			return;
+		}
+
+		if (!conn_is_pending_cis(conn))
+			continue;
+
+		conn_update_cis_handle(conn);
+		if (conn->handle != HCI_CONN_HANDLE_UNSET)
+			pending = true;
+	}
+
+	rcu_read_unlock();
+
+	if (!pending)
+		return;
+
+	err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, NULL,
+				 create_cis_complete);
 	if (err)
-		return err;
-
-	cis->state = BT_CONNECT;
-
-	return 0;
+		fail_pending_cis(hdev, err, false);
 }
 
 static void hci_iso_qos_setup(struct hci_dev *hdev, struct hci_conn *conn,
@@ -2146,6 +2349,13 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 {
 	struct hci_conn *le;
 	struct hci_conn *cis;
+	struct cig_list *cig;
+
+	cis = hci_bind_cis(hdev, dst, dst_type, qos);
+	if (IS_ERR(cis))
+		return cis;
+
+	hci_conn_hold(cis);
 
 	if (hci_dev_test_flag(hdev, HCI_ADVERTISING))
 		le = hci_connect_le(hdev, dst, dst_type, false,
@@ -2157,30 +2367,31 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 					 BT_SECURITY_LOW,
 					 HCI_LE_CONN_TIMEOUT,
 					 CONN_REASON_ISO_CONNECT);
-	if (IS_ERR(le))
+	if (IS_ERR(le)) {
+		hci_conn_drop(cis);
 		return le;
+	}
 
 	hci_iso_qos_setup(hdev, le, &qos->out,
 			  le->le_tx_phy ? le->le_tx_phy : hdev->le_tx_def_phys);
 	hci_iso_qos_setup(hdev, le, &qos->in,
 			  le->le_rx_phy ? le->le_rx_phy : hdev->le_rx_def_phys);
 
-	cis = hci_bind_cis(hdev, dst, dst_type, qos);
-	if (IS_ERR(cis)) {
+	cig = hci_cig_list_find(&hdev->central_cig_list, qos->cig);
+	if (!cig) {
 		hci_conn_drop(le);
-		return cis;
+		hci_conn_drop(cis);
+		return ERR_PTR(-ENOENT);
 	}
 
-	le->link = cis;
 	cis->link = le;
 
-	hci_conn_hold(cis);
+	cig->active = true;
 
-	/* If LE is already connected and CIS handle is already set proceed to
-	 * Create CIS immediately.
-	 */
-	if (le->state == BT_CONNECTED && cis->handle != HCI_CONN_HANDLE_UNSET)
-		hci_le_create_cis(le);
+	cis->state = BT_CONNECT;
+
+	if (le->state == BT_CONNECTED)
+		hci_le_create_cis_pending(hdev);
 
 	return cis;
 }
@@ -2800,6 +3011,15 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 			r = hci_send_cmd(conn->hdev,
 					 HCI_OP_CREATE_CONN_CANCEL,
 					 6, &conn->dst);
+		} else if (conn->type == ISO_LINK) {
+			if (test_bit(HCI_CONN_CREATE_CIS, &conn->flags)) {
+				struct hci_cp_disconnect dc;
+
+				dc.handle = cpu_to_le16(conn->handle);
+				dc.reason = reason;
+				r = hci_send_cmd(conn->hdev, HCI_OP_DISCONNECT,
+						 sizeof(dc), &dc);
+			}
 		}
 		break;
 	case BT_CONNECT2:
