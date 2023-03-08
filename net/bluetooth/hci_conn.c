@@ -1074,7 +1074,15 @@ int hci_conn_del(struct hci_conn *conn)
 		/* Unacked frames */
 		hdev->acl_cnt += conn->sent;
 	} else if (conn->type == LE_LINK) {
+		struct hci_conn *iso = conn->link;
+
 		cancel_delayed_work(&conn->le_conn_timeout);
+
+		if (iso) {
+			iso->link = NULL;
+			if (iso->handle == HCI_CONN_HANDLE_UNSET)
+				hci_conn_del(iso);
+		}
 
 		if (hdev->le_pkts)
 			hdev->le_cnt += conn->sent;
