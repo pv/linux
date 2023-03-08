@@ -156,6 +156,15 @@ struct bdaddr_list_with_irk {
 	u8 local_irk[16];
 };
 
+struct cig_list {
+	struct list_head list;
+	u8 cig;
+	bool active;
+	__u8 num_cis;
+	struct bt_iso_qos qos[0x1f];
+	__u16 handles[0x1f];
+};
+
 /* Bitmask of connection flags */
 enum hci_conn_flags {
 	HCI_CONN_FLAG_REMOTE_WAKEUP = 1,
@@ -581,6 +590,7 @@ struct hci_dev {
 	struct list_head	pend_le_reports;
 	struct list_head	blocked_keys;
 	struct list_head	local_codecs;
+	struct list_head	central_cig_list;
 
 	struct hci_dev_stats	stat;
 
@@ -959,6 +969,7 @@ enum {
 	HCI_CONN_SCANNING,
 	HCI_CONN_AUTH_FAILURE,
 	HCI_CONN_PER_ADV,
+	HCI_CONN_CREATE_CIS,
 };
 
 static inline bool hci_conn_ssp_enabled(struct hci_conn *conn)
@@ -1165,10 +1176,15 @@ static inline struct hci_conn *hci_conn_hash_lookup_le(struct hci_dev *hdev,
 
 static inline struct hci_conn *hci_conn_hash_lookup_cis(struct hci_dev *hdev,
 							bdaddr_t *ba,
-							__u8 ba_type)
+							__u8 ba_type,
+							__u8 cig,
+							__u8 cis)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	if (cig == BT_ISO_QOS_CIG_UNSET || cis == BT_ISO_QOS_CIS_UNSET)
+		return NULL;
 
 	rcu_read_lock();
 
@@ -1176,10 +1192,14 @@ static inline struct hci_conn *hci_conn_hash_lookup_cis(struct hci_dev *hdev,
 		if (c->type != ISO_LINK)
 			continue;
 
-		if (ba_type == c->dst_type && !bacmp(&c->dst, ba)) {
-			rcu_read_unlock();
-			return c;
-		}
+		if (ba_type != c->dst_type || bacmp(&c->dst, ba))
+			continue;
+
+		if (c->iso_qos.cig != cig || c->iso_qos.cis != cis)
+			continue;
+
+		rcu_read_unlock();
+		return c;
 	}
 
 	rcu_read_unlock();
@@ -1298,7 +1318,9 @@ int hci_disconnect(struct hci_conn *conn, __u8 reason);
 bool hci_setup_sync(struct hci_conn *conn, __u16 handle);
 void hci_sco_setup(struct hci_conn *conn, __u8 status);
 bool hci_iso_setup_path(struct hci_conn *conn);
-int hci_le_create_cis(struct hci_conn *conn);
+void hci_le_create_cis_pending(struct hci_dev *hdev);
+void hci_cig_list_clear(struct list_head *cig_list);
+struct cig_list *hci_cig_list_find(struct list_head *cig_list, u8 cig);
 
 struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 			      u8 role);
