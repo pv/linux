@@ -6796,8 +6796,6 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 
 	hci_dev_lock(hdev);
 
-	hci_dev_clear_flag(hdev, HCI_CREATE_CIS);
-
 	conn = hci_conn_hash_lookup_handle(hdev, handle);
 	if (!conn) {
 		bt_dev_err(hdev,
@@ -6805,6 +6803,8 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 			   handle);
 		goto done;
 	}
+
+	clear_bit(HCI_CONN_CREATE_CIS, &conn->flags);
 
 	if (conn->type != ISO_LINK) {
 		bt_dev_err(hdev,

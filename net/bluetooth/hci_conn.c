@@ -1871,18 +1871,26 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 	return true;
 }
 
+static bool conn_is_pending_cis(struct hci_conn *conn)
+{
+	return conn->type == ISO_LINK && conn->state == BT_CONNECT &&
+		conn->link && conn->link->state == BT_CONNECTED;
+}
+
 static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 {
 	struct _packed {
 		struct hci_cp_le_create_cis cp;
-		struct hci_cis cis[1];
+		struct hci_cis cis[0x1f];
 	} cmd;
-	struct hci_conn *conn = data;
-	int err;
+	struct hci_conn *conn;
 
-	/* The spec allows only one pending LE Create CIS command at a time.  In
-	 * case the command is pending now, we postpone this operation until the
-	 * CIS established event from the previous command has been received.
+	/* The spec allows only one pending LE Create CIS command at a time.
+	 * If the command is pending now, we postpone until the CIS established
+	 * event from the previous commands has been received.
+	 *
+	 * There's no restriction that the CIS given in the command have to be
+	 * in the same CIG, so we create them in any order.
 	 *
 	 * BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
 	 * page 2566:
@@ -1904,37 +1912,44 @@ static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 	 */
 
 	memset(&cmd, 0, sizeof(cmd));
-	cmd.cis[0].acl_handle = cpu_to_le16(conn->link->handle);
-	cmd.cis[0].cis_handle = cpu_to_le16(conn->handle);
-	cmd.cp.num_cis++;
 
-	if (hci_dev_test_and_set_flag(hdev, HCI_CREATE_CIS))
+	hci_dev_lock(hdev);
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		if (test_bit(HCI_CONN_CREATE_CIS, &conn->flags))
+			goto done;
+	}
+
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		struct hci_cis *cis_data = &cmd.cis[cmd.cp.num_cis];
+
+		if (!conn_is_pending_cis(conn))
+			continue;
+
+		set_bit(HCI_CONN_CREATE_CIS, &conn->flags);
+		cis_data->acl_handle = cpu_to_le16(conn->link->handle);
+		cis_data->cis_handle = cpu_to_le16(conn->handle);
+		cmd.cp.num_cis++;
+
+		if (cmd.cp.num_cis >= ARRAY_SIZE(cmd.cis))
+			break;
+	}
+
+done:
+	rcu_read_unlock();
+
+	hci_dev_unlock(hdev);
+
+	if (!cmd.cp.num_cis)
 		return 0;
 
-	err = hci_send_cmd(hdev, HCI_OP_LE_CREATE_CIS, sizeof(cmd.cp) +
+	return hci_send_cmd(hdev, HCI_OP_LE_CREATE_CIS, sizeof(cmd.cp) +
 			    sizeof(cmd.cis[0]) * cmd.cp.num_cis, &cmd);
-	if (err)
-		hci_dev_clear_flag(hdev, HCI_CREATE_CIS);
-
-	return err;
 }
 
-static void create_cis_complete(struct hci_dev *hdev, void *data, int err)
-{
-	struct hci_conn *conn = data;
-
-	bt_dev_dbg(hdev, "conn %p", conn);
-
-	if (err) {
-		bt_dev_err(hdev, "Unable to create CIS: %d", err);
-		hci_connect_cfm(conn, err);
-		hci_conn_del(conn);
-
-		hci_le_create_cis_pending(hdev);
-	}
-}
-
-void hci_le_create_cis_pending(struct hci_dev *hdev)
+static void fail_pending_cis(struct hci_dev *hdev, int err, bool created)
 {
 	struct hci_conn *conn;
 
@@ -1942,27 +1957,59 @@ again:
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
-		int err;
-
-		if (conn->type != ISO_LINK || conn->state != BT_CONNECT ||
-		    !conn->link || conn->link->state != BT_CONNECTED)
-			continue;
+		if (created) {
+			if (!test_and_clear_bit(HCI_CONN_CREATE_CIS,
+						&conn->flags))
+				continue;
+		} else {
+			if (!conn_is_pending_cis(conn))
+				continue;
+		}
 
 		rcu_read_unlock();
 
-		/* Queue Create CIS */
-		err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, conn,
-					 create_cis_complete);
-		if (err) {
-			bt_dev_err(hdev, "Unable to create CIS: %d", err);
-			hci_connect_cfm(conn, err);
-			hci_conn_del(conn);
-			goto again;
-		}
-		return;
+		bt_dev_err(hdev, "Unable to create CIS: %d", err);
+		conn->state = BT_CLOSED;
+		hci_connect_cfm(conn, err);
+		hci_conn_del(conn);
+
+		goto again;
 	}
 
 	rcu_read_unlock();
+}
+
+static void create_cis_complete(struct hci_dev *hdev, void *data, int err)
+{
+	if (err) {
+		hci_dev_lock(hdev);
+		fail_pending_cis(hdev, err, true);
+		hci_le_create_cis_pending(hdev);
+		hci_dev_unlock(hdev);
+	}
+}
+
+void hci_le_create_cis_pending(struct hci_dev *hdev)
+{
+	struct hci_conn *conn;
+	int err;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		/* Command in progress: we will retry later */
+		if (test_bit(HCI_CONN_CREATE_CIS, &conn->flags)) {
+			rcu_read_unlock();
+			return;
+		}
+	}
+
+	rcu_read_unlock();
+
+	err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, NULL,
+				 create_cis_complete);
+	if (err)
+		fail_pending_cis(hdev, err, false);
 }
 
 int hci_le_create_cis(struct hci_conn *conn)
