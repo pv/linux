@@ -990,6 +990,12 @@ static void cis_cleanup(struct hci_conn *conn)
 	memset(&d, 0, sizeof(d));
 	d.cig = conn->iso_qos.cig;
 
+	/* Central CIS data path is not removed automatically on disconnects.
+	 * (Core v5.3 Vol 4 Part E 7.7.5)
+	 */
+	if (conn->role == HCI_ROLE_MASTER)
+		hci_iso_remove_path(conn);
+
 	/* Remove CIG if there are no other CIS connections using it. */
 	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_BOUND, &d);
 	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECT, &d);
@@ -2024,6 +2030,34 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 		cmd.codec = 0x03; /* Transparent Data */
 
 		if (hci_send_cmd(hdev, HCI_OP_LE_SETUP_ISO_PATH, sizeof(cmd),
+				 &cmd) < 0)
+			return false;
+	}
+
+	return true;
+}
+
+bool hci_iso_remove_path(struct hci_conn *conn)
+{
+	struct hci_dev *hdev = conn->hdev;
+	struct hci_cp_le_remove_iso_path cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+
+	if (conn->iso_path & 0x1) {
+		cmd.handle = cpu_to_le16(conn->handle);
+		cmd.direction = 0x00;
+
+		if (hci_send_cmd(hdev, HCI_OP_LE_REMOVE_ISO_PATH, sizeof(cmd),
+				 &cmd) < 0)
+			return false;
+	}
+
+	if (conn->iso_path & 0x2) {
+		cmd.handle = cpu_to_le16(conn->handle);
+		cmd.direction = 0x01;
+
+		if (hci_send_cmd(hdev, HCI_OP_LE_REMOVE_ISO_PATH, sizeof(cmd),
 				 &cmd) < 0)
 			return false;
 	}

@@ -3876,6 +3876,8 @@ static u8 hci_cc_le_setup_iso_path(struct hci_dev *hdev, void *data,
 		goto unlock;
 	}
 
+	conn->iso_path |= (1 << cp->direction);
+
 	switch (cp->direction) {
 	/* Input (Host to Controller) */
 	case 0x00:
