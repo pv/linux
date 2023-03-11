@@ -2182,6 +2182,17 @@ struct hci_rp_le_setup_iso_path {
 	__le16  handle;
 } __packed;
 
+#define HCI_OP_LE_REMOVE_ISO_PATH		0x206f
+struct hci_cp_le_remove_iso_path {
+	__le16  handle;
+	__u8    direction;
+} __packed;
+
+struct hci_rp_le_remove_iso_path {
+	__u8    status;
+	__le16  handle;
+} __packed;
+
 #define HCI_OP_LE_SET_HOST_FEATURE		0x2074
 struct hci_cp_le_set_host_feature {
 	__u8     bit_number;

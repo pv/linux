@@ -741,6 +741,7 @@ struct hci_conn {
 	__s8		tx_power;
 	__s8		max_tx_power;
 	struct bt_iso_qos iso_qos;
+	__u8		iso_path;
 	unsigned long	flags;
 
 	enum conn_reasons conn_reason;
@@ -1318,6 +1319,7 @@ int hci_disconnect(struct hci_conn *conn, __u8 reason);
 bool hci_setup_sync(struct hci_conn *conn, __u16 handle);
 void hci_sco_setup(struct hci_conn *conn, __u8 status);
 bool hci_iso_setup_path(struct hci_conn *conn);
+bool hci_iso_remove_path(struct hci_conn *conn);
 void hci_le_create_cis_pending(struct hci_dev *hdev);
 void hci_cig_list_clear(struct list_head *cig_list);
 struct cig_list *hci_cig_list_find(struct list_head *cig_list, u8 cig);
