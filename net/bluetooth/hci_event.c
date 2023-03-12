@@ -6818,7 +6818,7 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 	BT_ERR("%llu CIS Established CIG %d CIS %d (ACL@%d, CIS@%d)",
 		(unsigned long long)conn,
 		(int)conn->iso_qos.cig, (int)conn->iso_qos.cis,
-		(int)conn->link->handle,
+		(int)(conn->link ? conn->link->handle : -1),
 		(int)conn->handle);
 
 	pending = test_and_clear_bit(HCI_CONN_CREATE_CIS, &conn->flags);
