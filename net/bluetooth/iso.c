@@ -179,6 +179,8 @@ static void iso_conn_del(struct hci_conn *hcon, int err)
 
 	BT_DBG("hcon %p conn %p, err %d", hcon, conn, err);
 
+	BT_ERR("ISO CONN DEL %llu", (unsigned long long)conn);
+
 	/* Kill socket */
 	iso_conn_lock(conn);
 	sk = conn->sk;
@@ -1403,6 +1405,8 @@ static void iso_sock_ready(struct sock *sk)
 	if (!sk)
 		return;
 
+	BT_ERR("ISO SOCK READY");
+
 	lock_sock(sk);
 	iso_sock_clear_timer(sk);
 	sk->sk_state = BT_CONNECTED;
@@ -1430,6 +1434,8 @@ static void iso_conn_ready(struct iso_conn *conn)
 	struct hci_conn *hcon;
 
 	BT_DBG("conn %p", conn);
+
+	BT_ERR("ISO CONN READY %llu", (unsigned long long)conn->hcon);
 
 	if (sk) {
 		iso_sock_ready(conn->sk);

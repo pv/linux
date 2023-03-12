@@ -959,6 +959,8 @@ static int hci_le_remove_cig(struct hci_dev *hdev, u8 handle)
 {
 	bt_dev_dbg(hdev, "handle 0x%2.2x", handle);
 
+	BT_ERR("Remove CIG %d", (int)handle);
+
 	hci_cig_list_del(&hdev->central_cig_list, handle);
 
 	return hci_cmd_sync_queue(hdev, remove_cig_sync, ERR_PTR(handle), NULL);
@@ -974,6 +976,8 @@ static void find_cis(struct hci_conn *conn, void *data)
 
 	if (conn->iso_qos.cig != d->cig)
 		return;
+
+	BT_ERR("Using CIG %d: %llu", (int)d->cig, (unsigned long long)conn);
 
 	d->count++;
 }
@@ -997,6 +1001,7 @@ static void cis_cleanup(struct hci_conn *conn)
 		hci_iso_remove_path(conn);
 
 	/* Remove CIG if there are no other CIS connections using it. */
+	BT_ERR("Using CIG %d", (int)d.cig);
 	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_BOUND, &d);
 	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECT, &d);
 	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECTED, &d);
@@ -1143,6 +1148,8 @@ int hci_conn_del(struct hci_conn *conn)
 	struct hci_dev *hdev = conn->hdev;
 
 	BT_DBG("%s hcon %p handle %d", hdev->name, conn, conn->handle);
+
+	BT_ERR("DEL hcon %llu", (unsigned long long)conn);
 
 	cancel_delayed_work_sync(&conn->disc_work);
 	cancel_delayed_work_sync(&conn->auto_accept_work);
@@ -1410,6 +1417,7 @@ struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
 			return ERR_PTR(-ENOMEM);
 		hci_conn_hold(conn);
 		conn->pending_sec_level = sec_level;
+		BT_ERR("NEW LE hcon %llu", (unsigned long long)conn);
 	}
 
 	conn->dst_type = dst_type;
@@ -1626,6 +1634,8 @@ struct hci_conn *hci_connect_le_scan(struct hci_dev *hdev, bdaddr_t *dst,
 		return ERR_PTR(-EBUSY);
 	}
 
+	BT_ERR("NEW LE hcon %llu", (unsigned long long)conn);
+
 	conn->state = BT_CONNECT;
 	set_bit(HCI_CONN_SCANNING, &conn->flags);
 	conn->dst_type = dst_type;
@@ -1780,6 +1790,8 @@ static int hci_le_set_cig_params(struct hci_dev *hdev, struct cig_list *entry)
 		cis->c_rtn  = qos->out.rtn;
 		cis->p_rtn  = qos->in.rtn;
 	}
+
+	BT_ERR("Set CIG Params %d", qos->cig);
 
 	return hci_send_cmd(hdev, HCI_OP_LE_SET_CIG_PARAMS,
 			    sizeof(pdu.cp) +
@@ -1943,6 +1955,8 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 	struct hci_conn *cis;
 	int err;
 
+	BT_ERR("BIND CIG %d CIS %d", qos->cig, qos->cis);
+
 	cis = hci_conn_hash_lookup_cis(hdev, dst, dst_type, qos->cig, qos->cis);
 	if (!cis) {
 		cis = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
@@ -1950,6 +1964,8 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 			return ERR_PTR(-ENOMEM);
 		cis->cleanup = cis_cleanup;
 		cis->dst_type = dst_type;
+
+		BT_ERR("NEW CIS hcon %llu", (unsigned long long)cis);
 	}
 
 	/* Check configurable state */
@@ -1992,6 +2008,9 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 
 	cis->iso_qos = *qos;
 	cis->state = BT_BOUND;
+
+	BT_ERR("BOUND %llu CIG %d CIS %d", (unsigned long long)cis,
+		qos->cig, qos->cis);
 
 	return cis;
 }
@@ -2131,6 +2150,13 @@ static int hci_create_cis_sync(struct hci_dev *hdev, void *data)
 		cis_data->cis_handle = cpu_to_le16(conn->handle);
 		cmd.cp.num_cis++;
 
+		BT_ERR("%llu & %llu Create CIG %d CIS %d (ACL@%d, CIS@%d)",
+			(unsigned long long)conn,
+			(unsigned long long)conn->link,
+			(int)conn->iso_qos.cig, (int)conn->iso_qos.cis,
+			(int)conn->link->handle,
+			(int)conn->handle);
+
 		if (cmd.cp.num_cis >= ARRAY_SIZE(cmd.cis))
 			break;
 	}
@@ -2142,6 +2168,8 @@ done:
 
 	if (!cmd.cp.num_cis)
 		return 0;
+
+	BT_ERR("send create CIS");
 
 	return hci_send_cmd(hdev, HCI_OP_LE_CREATE_CIS, sizeof(cmd.cp) +
 			    sizeof(cmd.cis[0]) * cmd.cp.num_cis, &cmd);
@@ -2180,6 +2208,7 @@ again:
 static void create_cis_complete(struct hci_dev *hdev, void *data, int err)
 {
 	if (err) {
+		BT_ERR("Do Create CIS complete: failure");
 		hci_dev_lock(hdev);
 		fail_pending_cis(hdev, err, true);
 		hci_le_create_cis_pending(hdev);
@@ -2420,6 +2449,9 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		return cis;
 
 	hci_conn_hold(cis);
+
+	BT_ERR("CONNECT %llu CIG %d CIS %d", (unsigned long long)cis,
+		qos->cig, qos->cis);
 
 	if (hci_dev_test_flag(hdev, HCI_ADVERTISING))
 		le = hci_connect_le(hdev, dst, dst_type, false,
@@ -3040,6 +3072,8 @@ u32 hci_conn_get_phy(struct hci_conn *conn)
 int hci_abort_conn(struct hci_conn *conn, u8 reason)
 {
 	int r = 0;
+
+	BT_ERR("DISC hcon %llu", (unsigned long long)conn);
 
 	switch (conn->state) {
 	case BT_CONNECTED:
