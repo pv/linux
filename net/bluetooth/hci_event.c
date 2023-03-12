@@ -4226,6 +4226,8 @@ static void hci_cs_le_create_cis(struct hci_dev *hdev, u8 status)
 
 	hci_dev_lock(hdev);
 
+	BT_ERR("Create CIS failed");
+
 	/* Remove connection if command failed */
 	for (i = 0; cp->num_cis; cp->num_cis--, i++) {
 		struct hci_conn *conn;
@@ -6800,6 +6802,12 @@ static void hci_le_cis_estabilished_evt(struct hci_dev *hdev, void *data,
 			   handle);
 		goto done;
 	}
+
+	BT_ERR("%llu CIS Established CIG %d CIS %d (ACL@%d, CIS@%d)",
+		(unsigned long long)conn,
+		(int)conn->iso_qos.cig, (int)conn->iso_qos.cis,
+		(int)conn->link->handle,
+		(int)conn->handle);
 
 	pending = test_and_clear_bit(HCI_CONN_CREATE_CIS, &conn->flags);
 
