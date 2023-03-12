@@ -163,6 +163,7 @@ struct cig_list {
 	__u8 num_cis;
 	struct bt_iso_qos qos[0x1f];
 	__u16 handles[0x1f];
+	__u8 data_path[0x1f];
 };
 
 /* Bitmask of connection flags */
@@ -1323,6 +1324,8 @@ bool hci_iso_remove_path(struct hci_conn *conn);
 void hci_le_create_cis_pending(struct hci_dev *hdev);
 void hci_cig_list_clear(struct list_head *cig_list);
 struct cig_list *hci_cig_list_find(struct list_head *cig_list, u8 cig);
+struct cig_list *hci_cig_list_find_cis(struct list_head *cig_list, u8 cig,
+				       u8 cis, int *i);
 
 struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 			      u8 role);

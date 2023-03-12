@@ -3878,6 +3878,18 @@ static u8 hci_cc_le_setup_iso_path(struct hci_dev *hdev, void *data,
 
 	conn->iso_path |= (1 << cp->direction);
 
+	if (conn->role == HCI_ROLE_MASTER) {
+		struct cig_list *cig;
+		int i;
+
+		cig = hci_cig_list_find_cis(&hdev->central_cig_list,
+					    conn->iso_qos.cig,
+					    conn->iso_qos.cis,
+					    &i);
+		if (cig)
+			cig->data_path[i] = conn->iso_path;
+	}
+
 	switch (cp->direction) {
 	/* Input (Host to Controller) */
 	case 0x00:

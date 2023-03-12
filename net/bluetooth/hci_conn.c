@@ -786,6 +786,26 @@ struct cig_list *hci_cig_list_find(struct list_head *cig_list, u8 cig)
 	return NULL;
 }
 
+struct cig_list *hci_cig_list_find_cis(struct list_head *cig_list, u8 cig,
+				       u8 cis, int *pos)
+{
+	struct cig_list *c;
+	int i;
+
+	c = hci_cig_list_find(cig_list, cig);
+	if (!c)
+		return NULL;
+
+	for (i = 0; i < c->num_cis; ++i)
+		if (c->qos[i].cis == cis)
+			break;
+	if (i == c->num_cis)
+		return NULL;
+
+	*pos = i;
+	return c;
+}
+
 static struct cig_list *hci_cig_list_add(struct list_head *cig_list, u8 cig)
 {
 	struct cig_list *entry;
@@ -993,12 +1013,6 @@ static void cis_cleanup(struct hci_conn *conn)
 
 	memset(&d, 0, sizeof(d));
 	d.cig = conn->iso_qos.cig;
-
-	/* Central CIS data path is not removed automatically on disconnects.
-	 * (Core v5.3 Vol 4 Part E 7.7.5)
-	 */
-	if (conn->role == HCI_ROLE_MASTER)
-		hci_iso_remove_path(conn);
 
 	/* Remove CIG if there are no other CIS connections using it. */
 	BT_ERR("Using CIG %d", (int)d.cig);
@@ -2019,10 +2033,23 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
 	struct hci_cp_le_setup_iso_path cmd;
+	u8 existing = 0;
+
+	if (conn->role == HCI_ROLE_MASTER) {
+		struct cig_list *cig;
+		int i;
+
+		cig = hci_cig_list_find_cis(&hdev->central_cig_list,
+					    conn->iso_qos.cig,
+					    conn->iso_qos.cis,
+					    &i);
+		if (cig)
+			existing = cig->data_path[i];
+	}
 
 	memset(&cmd, 0, sizeof(cmd));
 
-	if (conn->iso_qos.out.sdu) {
+	if (conn->iso_qos.out.sdu && !(existing & 0x1)) {
 		cmd.handle = cpu_to_le16(conn->handle);
 		cmd.direction = 0x00; /* Input (Host to Controller) */
 		cmd.path = 0x00; /* HCI path if enabled */
@@ -2033,7 +2060,7 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 			return false;
 	}
 
-	if (conn->iso_qos.in.sdu) {
+	if (conn->iso_qos.in.sdu && !(existing & 0x2)) {
 		cmd.handle = cpu_to_le16(conn->handle);
 		cmd.direction = 0x01; /* Output (Controller to Host) */
 		cmd.path = 0x00; /* HCI path if enabled */
@@ -2054,23 +2081,12 @@ bool hci_iso_remove_path(struct hci_conn *conn)
 
 	memset(&cmd, 0, sizeof(cmd));
 
-	if (conn->iso_path & 0x1) {
-		cmd.handle = cpu_to_le16(conn->handle);
-		cmd.direction = 0x00;
+	cmd.handle = cpu_to_le16(conn->handle);
+	cmd.direction = conn->iso_path;
 
-		if (hci_send_cmd(hdev, HCI_OP_LE_REMOVE_ISO_PATH, sizeof(cmd),
-				 &cmd) < 0)
-			return false;
-	}
-
-	if (conn->iso_path & 0x2) {
-		cmd.handle = cpu_to_le16(conn->handle);
-		cmd.direction = 0x01;
-
-		if (hci_send_cmd(hdev, HCI_OP_LE_REMOVE_ISO_PATH, sizeof(cmd),
-				 &cmd) < 0)
-			return false;
-	}
+	if (hci_send_cmd(hdev, HCI_OP_LE_REMOVE_ISO_PATH, sizeof(cmd),
+			 &cmd) < 0)
+		return false;
 
 	return true;
 }
