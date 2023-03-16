@@ -3827,7 +3827,14 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 
 	hci_dev_lock(hdev);
 
+	cig = hci_cig_list_find(&hdev->central_cig_list, rp->cig_id);
+
 	if (rp->status) {
+		if (cig) {
+			for (i = 0; i < cig->num_cis; ++i)
+				cig->handles[i] = HCI_CONN_HANDLE_UNSET;
+		}
+
 		while ((conn = hci_conn_hash_lookup_cig(hdev, rp->cig_id))) {
 			conn->state = BT_CLOSED;
 			hci_connect_cfm(conn, rp->status);
@@ -3836,7 +3843,6 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 		goto unlock;
 	}
 
-	cig = hci_cig_list_find(&hdev->central_cig_list, rp->cig_id);
 	if (!cig || rp->num_handles != cig->num_cis)
 		goto unlock;
 
