@@ -1725,13 +1725,15 @@ static void cis_list(struct hci_conn *conn, void *data)
 	if (!bacmp(&conn->dst, BDADDR_ANY))
 		return;
 
-	if (d->cig != conn->iso_qos.ucast.cig || d->cis == BT_ISO_QOS_CIS_UNSET ||
-	    d->cis != conn->iso_qos.ucast.cis)
+	if (d->cig != conn->iso_qos.ucast.cig)
+		return;
+	if (d->cis != BT_ISO_QOS_CIS_UNSET && d->cis != conn->iso_qos.ucast.cis)
 		return;
 
 	d->count++;
 
 	if (d->pdu.cp.cig_id == BT_ISO_QOS_CIG_UNSET ||
+	    d->cis == BT_ISO_QOS_CIS_UNSET ||
 	    d->count >= ARRAY_SIZE(d->pdu.cis))
 		return;
 
@@ -1768,14 +1770,14 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 
 	memset(&data, 0, sizeof(data));
 
-	/* Allocate a CIG if not set */
+	/* Allocate first still reconfigurable CIG if not set */
 	if (qos->ucast.cig == BT_ISO_QOS_CIG_UNSET) {
-		for (data.cig = 0x00; data.cig < 0xff; data.cig++) {
+		for (data.cig = 0x00; data.cig < 0xf0; data.cig++) {
 			data.count = 0;
-			data.cis = 0xff;
+			data.cis = BT_ISO_QOS_CIS_UNSET;
 
 			hci_conn_hash_list_state(hdev, cis_list, ISO_LINK,
-						 BT_BOUND, &data);
+						 BT_CONNECT, &data);
 			if (data.count)
 				continue;
 
@@ -1785,7 +1787,7 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 				break;
 		}
 
-		if (data.cig == 0xff)
+		if (data.cig == 0xf0)
 			return false;
 
 		/* Update CIG */
