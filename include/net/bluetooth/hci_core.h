@@ -538,6 +538,7 @@ struct hci_dev {
 	struct sk_buff_head	cmd_q;
 
 	struct sk_buff		*sent_cmd;
+	struct sk_buff		*sync_cmd;
 	struct sk_buff		*recv_event;
 
 	struct mutex		req_lock;

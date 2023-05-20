@@ -134,6 +134,7 @@ static int hci_cmd_sync_run(struct hci_request *req)
 	skb = skb_peek_tail(&req->cmd_q);
 	bt_cb(skb)->hci.req_complete_skb = hci_cmd_sync_complete;
 	bt_cb(skb)->hci.req_flags |= HCI_REQ_SKB;
+	bt_cb(skb)->hci.req_flags |= HCI_REQ_SYNC;
 
 	bt_dev_dbg(hdev, "run skb %p", skb);
 
