@@ -5,6 +5,8 @@
  * Copyright (C) 2021 Intel Corporation
  */
 
+#define DEBUG
+
 #include <linux/property.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -133,6 +135,8 @@ static int hci_cmd_sync_run(struct hci_request *req)
 	bt_cb(skb)->hci.req_complete_skb = hci_cmd_sync_complete;
 	bt_cb(skb)->hci.req_flags |= HCI_REQ_SKB;
 
+	bt_dev_dbg(hdev, "run skb %p", skb);
+
 	spin_lock_irqsave(&hdev->cmd_q.lock, flags);
 	skb_queue_splice_tail(&req->cmd_q, &hdev->cmd_q);
 	spin_unlock_irqrestore(&hdev->cmd_q.lock, flags);
@@ -151,7 +155,7 @@ struct sk_buff *__hci_cmd_sync_sk(struct hci_dev *hdev, u16 opcode, u32 plen,
 	struct sk_buff *skb;
 	int err = 0;
 
-	bt_dev_dbg(hdev, "Opcode 0x%4x", opcode);
+	bt_dev_dbg(hdev, "Opcode 0x%4x event 0x%04x", opcode, event);
 
 	hci_req_init(&req, hdev);
 
@@ -189,7 +193,7 @@ struct sk_buff *__hci_cmd_sync_sk(struct hci_dev *hdev, u16 opcode, u32 plen,
 	skb = hdev->req_skb;
 	hdev->req_skb = NULL;
 
-	bt_dev_dbg(hdev, "end: err %d", err);
+	bt_dev_dbg(hdev, "end: err %d opcode 0x%4x", err, opcode);
 
 	if (err < 0) {
 		kfree_skb(skb);
@@ -703,6 +707,8 @@ int hci_cmd_sync_submit(struct hci_dev *hdev, hci_cmd_sync_work_func_t func,
 	entry->func = func;
 	entry->data = data;
 	entry->destroy = destroy;
+
+	bt_dev_dbg(hdev, "entry %p", entry);
 
 	mutex_lock(&hdev->cmd_sync_work_lock);
 	list_add_tail(&entry->list, &hdev->cmd_sync_work_list);
@@ -6052,6 +6058,7 @@ static int hci_le_ext_create_conn_sync(struct hci_dev *hdev,
 		plen += sizeof(*p);
 	}
 
+	BT_DBG("WAIT FOR ENH CONN COMPLETE 0x%x", (int)HCI_EV_LE_ENHANCED_CONN_COMPLETE);
 	return __hci_cmd_sync_status_sk(hdev, HCI_OP_LE_EXT_CREATE_CONN,
 					plen, data,
 					HCI_EV_LE_ENHANCED_CONN_COMPLETE,
@@ -6146,6 +6153,7 @@ int hci_le_create_conn_sync(struct hci_dev *hdev, struct hci_conn *conn)
 	 * is unmasked, only the HCI_LE_Enhanced_Connection_Complete event is
 	 * sent when a new connection has been created.
 	 */
+	BT_DBG("HDEV ENH CONN COMPLETE %d", (int)use_enhanced_conn_complete(hdev));
 	err = __hci_cmd_sync_status_sk(hdev, HCI_OP_LE_CREATE_CONN,
 				       sizeof(cp), &cp,
 				       use_enhanced_conn_complete(hdev) ?
