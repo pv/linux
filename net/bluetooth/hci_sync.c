@@ -191,6 +191,9 @@ struct sk_buff *__hci_cmd_sync_sk(struct hci_dev *hdev, u16 opcode, u32 plen,
 
 	bt_dev_dbg(hdev, "end: err %d", err);
 
+	/* Queue more work, in case it was blocked waiting for us */
+	queue_work(hdev->workqueue, &hdev->cmd_work);
+
 	if (err < 0) {
 		kfree_skb(skb);
 		return ERR_PTR(err);
@@ -640,6 +643,8 @@ void hci_cmd_sync_init(struct hci_dev *hdev)
 void hci_cmd_sync_clear(struct hci_dev *hdev)
 {
 	struct hci_cmd_sync_work_entry *entry, *tmp;
+
+	hci_cmd_sync_cancel(hdev, -ECANCELED);
 
 	cancel_work_sync(&hdev->cmd_sync_work);
 	cancel_work_sync(&hdev->reenable_adv_work);

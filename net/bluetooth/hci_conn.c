@@ -2848,11 +2848,13 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 		if (conn->type == LE_LINK) {
 			if (test_bit(HCI_CONN_SCANNING, &conn->flags))
 				break;
+			hci_dev_clear_flag(conn->hdev, HCI_CMD_PENDING);
 			r = hci_send_cmd(conn->hdev,
 					 HCI_OP_LE_CREATE_CONN_CANCEL, 0, NULL);
 		} else if (conn->type == ACL_LINK) {
 			if (conn->hdev->hci_ver < BLUETOOTH_VER_1_2)
 				break;
+			hci_dev_clear_flag(conn->hdev, HCI_CMD_PENDING);
 			r = hci_send_cmd(conn->hdev,
 					 HCI_OP_CREATE_CONN_CANCEL,
 					 6, &conn->dst);
