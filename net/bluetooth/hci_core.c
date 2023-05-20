@@ -1499,6 +1499,8 @@ static void hci_cmd_timeout(struct work_struct *work)
 		bt_dev_err(hdev, "command tx timeout");
 	}
 
+	hci_dev_clear_flag(hdev, HCI_CMD_PENDING);
+
 	if (hdev->cmd_timeout)
 		hdev->cmd_timeout(hdev);
 
@@ -4091,6 +4093,16 @@ static void hci_cmd_work(struct work_struct *work)
 
 	BT_DBG("%s cmd_cnt %d cmd queued %d", hdev->name,
 	       atomic_read(&hdev->cmd_cnt), skb_queue_len(&hdev->cmd_q));
+
+	/* Do not send a new command if event is pending for a previous one.
+	 * This avoids blocking the sync queue if a sync command is waiting
+	 * for an event while eg. hci_send_cmd queues and sends a new command.
+	 * We continue sending on event or timeout.
+	 */
+	if (hci_dev_test_flag(hdev, HCI_CMD_PENDING)) {
+		BT_DBG("%s wait pending", hdev->name);
+		return;
+	}
 
 	/* Send queued commands */
 	if (atomic_read(&hdev->cmd_cnt)) {
