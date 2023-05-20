@@ -23,8 +23,9 @@
    SOFTWARE IS DISCLAIMED.
 */
 
-/* Bluetooth HCI core. */
+#define DEBUG
 
+/* Bluetooth HCI core. */
 #include <linux/export.h>
 #include <linux/rfkill.h>
 #include <linux/debugfs.h>
@@ -3988,8 +3989,11 @@ void hci_req_cmd_complete(struct hci_dev *hdev, u16 opcode, u8 status,
 	 */
 	if (bt_cb(hdev->sent_cmd)->hci.req_flags & HCI_REQ_SKB) {
 		*req_complete_skb = bt_cb(hdev->sent_cmd)->hci.req_complete_skb;
+		BT_DBG("POINT B %p", *req_complete_skb);
 		return;
 	}
+
+	BT_DBG("POINT C", opcode, status);
 
 	if (bt_cb(hdev->sent_cmd)->hci.req_complete) {
 		*req_complete = bt_cb(hdev->sent_cmd)->hci.req_complete;
@@ -4116,6 +4120,7 @@ static void hci_cmd_work(struct work_struct *work)
 		kfree_skb(hdev->sent_cmd);
 
 		hdev->sent_cmd = skb_clone(skb, GFP_KERNEL);
+		BT_DBG("sent_cmd %p = skb %p", hdev->sent_cmd, skb);
 		if (hdev->sent_cmd) {
 			int res;
 			if (hci_req_status_pend(hdev))

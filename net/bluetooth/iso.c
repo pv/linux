@@ -6,6 +6,8 @@
  * Copyright 2023 NXP
  */
 
+#define DEBUG
+
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>

@@ -25,6 +25,8 @@
 
 /* Bluetooth HCI connection handling. */
 
+#define DEBUG
+
 #include <linux/export.h>
 #include <linux/debugfs.h>
 
@@ -1948,7 +1950,7 @@ int hci_le_create_cis(struct hci_conn *conn)
 	struct hci_dev *hdev = conn->hdev;
 	int err;
 
-	bt_dev_dbg(hdev, "hcon %p", conn);
+	bt_dev_dbg(hdev, "hcon %llu", (unsigned long long)conn);
 
 	switch (conn->type) {
 	case LE_LINK:
@@ -1982,6 +1984,7 @@ int hci_le_create_cis(struct hci_conn *conn)
 		return 0;
 
 	/* Queue Create CIS */
+	bt_dev_dbg(hdev, "hcon %llu queue create cis", (unsigned long long)conn);
 	err = hci_cmd_sync_queue(hdev, hci_create_cis_sync, cis, NULL);
 	if (err)
 		return err;

@@ -25,6 +25,8 @@
 
 /* Bluetooth HCI event handling. */
 
+#define DEBUG
+
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -7109,7 +7111,9 @@ static void hci_le_meta_evt(struct hci_dev *hdev, void *data,
 	struct hci_ev_le_meta *ev = data;
 	const struct hci_le_ev *subev;
 
-	bt_dev_dbg(hdev, "subevent 0x%2.2x", ev->subevent);
+	bt_dev_dbg(hdev, "subevent 0x%2.2x wanted 0x%02x opcode 0x%02x",
+		ev->subevent, hdev->sent_cmd ? hci_skb_event(hdev->sent_cmd) : -1,
+		hdev->sent_cmd ? hci_skb_opcode(hdev->sent_cmd) : -1);
 
 	/* Only match event if command OGF is for LE */
 	if (hdev->sent_cmd &&
@@ -7501,6 +7505,8 @@ void hci_event_packet(struct hci_dev *hdev, struct sk_buff *skb)
 		goto done;
 	}
 
+	bt_dev_dbg(hdev, "event 0x%2.2x sent cmd %p", event, hdev->sent_cmd);
+
 	/* Only match event if command OGF is not for LE */
 	if (hdev->sent_cmd &&
 	    hci_opcode_ogf(hci_skb_opcode(hdev->sent_cmd)) != 0x08 &&
@@ -7524,10 +7530,13 @@ void hci_event_packet(struct hci_dev *hdev, struct sk_buff *skb)
 	/* Store wake reason if we're suspended */
 	hci_store_wake_reason(hdev, event, skb);
 
-	bt_dev_dbg(hdev, "event 0x%2.2x", event);
+	bt_dev_dbg(hdev, "event 0x%2.2x sent cmd %p", event, hdev->sent_cmd);
 
 	hci_event_func(hdev, event, skb, &opcode, &status, &req_complete,
 		       &req_complete_skb);
+
+	bt_dev_dbg(hdev, "event 0x%2.2x HAVE %p %p", event,
+		req_complete, req_complete_skb);
 
 	if (req_complete) {
 		req_complete(hdev, status, opcode);
