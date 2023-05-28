@@ -893,6 +893,10 @@ static void find_cis(struct hci_conn *conn, void *data)
 	if (!bacmp(&conn->dst, BDADDR_ANY) || d->cig != conn->iso_qos.ucast.cig)
 		return;
 
+	/* Optionally match CIS */
+	if (d->cis != BT_ISO_QOS_CIS_UNSET && d->cis != conn->iso_qos.ucast.cis)
+		return;
+
 	d->count++;
 }
 
@@ -910,6 +914,7 @@ static void cis_cleanup(struct hci_conn *conn)
 
 	memset(&d, 0, sizeof(d));
 	d.cig = conn->iso_qos.ucast.cig;
+	d.cis = BT_ISO_QOS_CIS_UNSET;
 
 	/* Check if ISO connection is a CIS and remove CIG if there are
 	 * no other connections using it.
@@ -1678,8 +1683,12 @@ struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
 
 static void cis_add(struct iso_list_data *d, struct bt_iso_qos *qos)
 {
-	struct hci_cis_params *cis = &d->pdu.cis[d->pdu.cp.num_cis];
+	struct hci_cis_params *cis;
 
+	if (d->pdu.cp.num_cis >= ARRAY_SIZE(d->pdu.cis))
+		return;
+
+	cis = &d->pdu.cis[d->pdu.cp.num_cis];
 	cis->cis_id = qos->ucast.cis;
 	cis->c_sdu  = cpu_to_le16(qos->ucast.out.sdu);
 	cis->p_sdu  = cpu_to_le16(qos->ucast.in.sdu);
@@ -1695,18 +1704,7 @@ static void cis_list(struct hci_conn *conn, void *data)
 {
 	struct iso_list_data *d = data;
 
-	/* Skip if broadcast/ANY address */
-	if (!bacmp(&conn->dst, BDADDR_ANY))
-		return;
-
-	if (d->cig != conn->iso_qos.ucast.cig || d->cis == BT_ISO_QOS_CIS_UNSET ||
-	    d->cis != conn->iso_qos.ucast.cis)
-		return;
-
-	d->count++;
-
-	if (d->pdu.cp.cig_id == BT_ISO_QOS_CIG_UNSET ||
-	    d->count >= ARRAY_SIZE(d->pdu.cis))
+	if (!bacmp(&conn->dst, BDADDR_ANY) || d->cig != conn->iso_qos.ucast.cig)
 		return;
 
 	cis_add(d, &conn->iso_qos);
@@ -1774,29 +1772,7 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 
 	memset(&data, 0, sizeof(data));
 
-	/* Allocate first still reconfigurable CIG if not set */
-	if (qos->ucast.cig == BT_ISO_QOS_CIG_UNSET) {
-		for (data.cig = 0x00; data.cig < 0xf0; data.cig++) {
-			data.count = 0;
-
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-						 BT_CONNECT, &data);
-			if (data.count)
-				continue;
-
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-						 BT_CONNECTED, &data);
-			if (!data.count)
-				break;
-		}
-
-		if (data.cig == 0xf0)
-			return false;
-
-		/* Update CIG */
-		qos->ucast.cig = data.cig;
-	}
-
+	/* Reprogram CIS */
 	data.pdu.cp.cig_id = qos->ucast.cig;
 	hci_cpu_to_le24(qos->ucast.out.interval, data.pdu.cp.c_interval);
 	hci_cpu_to_le24(qos->ucast.in.interval, data.pdu.cp.p_interval);
@@ -1806,38 +1782,12 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 	data.pdu.cp.c_latency = cpu_to_le16(qos->ucast.out.latency);
 	data.pdu.cp.p_latency = cpu_to_le16(qos->ucast.in.latency);
 
-	if (qos->ucast.cis != BT_ISO_QOS_CIS_UNSET) {
-		data.count = 0;
-		data.cig = qos->ucast.cig;
-		data.cis = qos->ucast.cis;
+	cis_add(&data, qos);
 
-		hci_conn_hash_list_state(hdev, cis_list, ISO_LINK, BT_BOUND,
-					 &data);
-		if (data.count)
-			return false;
+	data.cig = qos->ucast.cig;
+	hci_conn_hash_list_state(hdev, cis_list, ISO_LINK, BT_BOUND, &data);
 
-		cis_add(&data, qos);
-	}
-
-	/* Reprogram all CIS(s) with the same CIG */
-	for (data.cig = qos->ucast.cig, data.cis = 0x00; data.cis < 0x11;
-	     data.cis++) {
-		data.count = 0;
-
-		hci_conn_hash_list_state(hdev, cis_list, ISO_LINK, BT_BOUND,
-					 &data);
-		if (data.count)
-			continue;
-
-		/* Allocate a CIS if not set */
-		if (qos->ucast.cis == BT_ISO_QOS_CIS_UNSET) {
-			/* Update CIS */
-			qos->ucast.cis = data.cis;
-			cis_add(&data, qos);
-		}
-	}
-
-	if (qos->ucast.cis == BT_ISO_QOS_CIS_UNSET || !data.pdu.cp.num_cis)
+	if (!data.pdu.cp.num_cis)
 		return false;
 
 	pdu = kmemdup(&data.pdu, sizeof(*pdu), GFP_KERNEL);
@@ -1853,28 +1803,106 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 	return true;
 }
 
+static bool hci_check_cig_configurable(struct hci_dev *hdev, u8 cig)
+{
+	struct hci_conn *conn;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(conn, &hdev->conn_hash.list, list) {
+		if (conn->type != ISO_LINK || !bacmp(&conn->dst, BDADDR_ANY))
+			continue;
+		if (conn->state != BT_OPEN && conn->state != BT_BOUND &&
+		    conn->iso_qos.ucast.cig == cig) {
+			rcu_read_unlock();
+			return false;
+		}
+	}
+
+	rcu_read_unlock();
+
+	return true;
+}
+
+static bool hci_check_cis_qos(struct hci_dev *hdev, struct bt_iso_qos *qos)
+{
+	struct iso_list_data data;
+
+	/* Allocate first still reconfigurable CIG if not set */
+	if (qos->ucast.cig == BT_ISO_QOS_CIG_UNSET) {
+		for (data.cig = 0x00; data.cig < 0xf0; data.cig++)
+			if (hci_check_cig_configurable(hdev, data.cig))
+				break;
+
+		if (data.cig == 0xf0)
+			return false;
+	} else {
+		if (qos->ucast.cig >= 0xf0)
+			return false;
+
+		data.cig = qos->ucast.cig;
+
+		/* Fail early if CIG is not configurable */
+		if (!hci_check_cig_configurable(hdev, data.cig))
+			return false;
+	}
+
+	/* Allocate free CIS if not set */
+	if (qos->ucast.cis == BT_ISO_QOS_CIS_UNSET) {
+		for (data.cis = 0x00; data.cis < 0xf0; data.cis++) {
+			data.count = 0;
+			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+						 BT_BOUND, &data);
+			if (!data.count)
+				break;
+		}
+
+		if (data.cis == 0xf0)
+			return false;
+	} else {
+		if (qos->ucast.cis >= 0xf0)
+			return false;
+
+		/* Check if exists */
+		data.cis = qos->ucast.cis;
+		data.count = 0;
+		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+					 BT_BOUND, &data);
+		if (data.count)
+			return false;
+	}
+
+	qos->ucast.cig = data.cig;
+	qos->ucast.cis = data.cis;
+
+	return true;
+}
+
 struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 			      __u8 dst_type, struct bt_iso_qos *qos)
 {
 	struct hci_conn *cis;
 
+	/* Check for previously bound CIS */
 	cis = hci_conn_hash_lookup_cis(hdev, dst, dst_type, qos->ucast.cig,
 				       qos->ucast.cis);
-	if (!cis) {
-		cis = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
-		if (!cis)
-			return ERR_PTR(-ENOMEM);
-		cis->cleanup = cis_cleanup;
-		cis->dst_type = dst_type;
+	if (cis) {
+		if (cis->state == BT_BOUND &&
+		    !memcmp(&cis->iso_qos, qos, sizeof(*qos)))
+			return cis;
+
+		return ERR_PTR(-EEXIST);
 	}
 
-	if (cis->state == BT_CONNECTED)
-		return cis;
+	if (!hci_check_cis_qos(hdev, qos))
+		return ERR_PTR(-EINVAL);
 
-	/* Check if CIS has been set and the settings matches */
-	if (cis->state == BT_BOUND &&
-	    !memcmp(&cis->iso_qos, qos, sizeof(*qos)))
-		return cis;
+	cis = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
+	if (!cis)
+		return ERR_PTR(-ENOMEM);
+
+	cis->cleanup = cis_cleanup;
+	cis->dst_type = dst_type;
 
 	/* Update LINK PHYs according to QoS preference */
 	cis->le_tx_phy = qos->ucast.out.phy;
