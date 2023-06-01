@@ -2297,16 +2297,35 @@ struct hci_conn_params *hci_conn_params_add(struct hci_dev *hdev,
 	return params;
 }
 
-static void hci_conn_params_free(struct hci_conn_params *params)
+static void hci_conn_params_cleanup(struct hci_conn_params *params)
 {
 	if (params->conn) {
 		hci_conn_drop(params->conn);
 		hci_conn_put(params->conn);
+		params->conn = NULL;
 	}
 
 	list_del(&params->action);
 	list_del(&params->list);
+}
+
+static void hci_conn_params_free(struct hci_conn_params *params)
+{
+	hci_conn_params_cleanup(params);
 	kfree(params);
+}
+
+static void hci_conn_params_free_complete(struct hci_dev *hdev, void *data,
+					  int err)
+{
+	struct hci_conn_params *params = data;
+
+	kfree(params);
+}
+
+static int hci_conn_params_free_sync(struct hci_dev *hdev, void *data)
+{
+	return 0;
 }
 
 /* This function requires the caller holds hdev->lock */
@@ -2318,7 +2337,10 @@ void hci_conn_params_del(struct hci_dev *hdev, bdaddr_t *addr, u8 addr_type)
 	if (!params)
 		return;
 
-	hci_conn_params_free(params);
+	/* Scan update may be using the params, so free via hci_sync */
+	hci_conn_params_cleanup(params);
+	hci_cmd_sync_queue(hdev, hci_conn_params_free_sync, params,
+			   hci_conn_params_free_complete);
 
 	hci_update_passive_scan(hdev);
 

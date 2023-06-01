@@ -2447,6 +2447,31 @@ struct sk_buff *hci_read_local_oob_data_sync(struct hci_dev *hdev,
 	return __hci_cmd_sync_sk(hdev, opcode, 0, NULL, 0, HCI_CMD_TIMEOUT, sk);
 }
 
+static void hci_conn_params_iter_init(struct list_head *list)
+{
+	struct hci_conn_params *params;
+
+	list_for_each_entry(params, list, action)
+		params->add_pending = true;
+}
+
+static struct hci_conn_params *hci_conn_params_iter_next(struct list_head *list)
+{
+	struct hci_conn_params *params;
+
+	/* Must hold hdev lock. Not reentrant. Mutating list is allowed. */
+
+	list_for_each_entry(params, list, action) {
+		if (!params->add_pending)
+			continue;
+
+		params->add_pending = false;
+		return params;
+	}
+
+	return NULL;
+}
+
 /* Device must not be scanning when updating the accept list.
  *
  * Update is done using the following sequence:
@@ -2494,6 +2519,8 @@ static u8 hci_update_accept_list_sync(struct hci_dev *hdev)
 		goto done;
 	}
 
+	hci_dev_lock(hdev);
+
 	/* Go through the current accept list programmed into the
 	 * controller one by one and check if that address is connected or is
 	 * still in the list of pending connections or list of devices to
@@ -2515,8 +2542,10 @@ static u8 hci_update_accept_list_sync(struct hci_dev *hdev)
 		 * remove it from the acceptlist.
 		 */
 		if (!pend_conn && !pend_report) {
+			hci_dev_unlock(hdev);
 			hci_le_del_accept_list_sync(hdev, &b->bdaddr,
 						    b->bdaddr_type);
+			hci_dev_lock(hdev);
 			continue;
 		}
 
@@ -2532,22 +2561,38 @@ static u8 hci_update_accept_list_sync(struct hci_dev *hdev)
 	 * available accept list entries in the controller, then
 	 * just abort and return filer policy value to not use the
 	 * accept list.
+	 *
+	 * The list may be mutated at any time outside hdev lock,
+	 * so use special iterator. The params is guaranteed to
+	 * not be freed while we hold req_sync_lock.
 	 */
-	list_for_each_entry(params, &hdev->pend_le_conns, action) {
+
+	hci_conn_params_iter_init(&hdev->pend_le_conns);
+
+	while ((params = hci_conn_params_iter_next(&hdev->pend_le_conns))) {
+		hci_dev_unlock(hdev);
 		err = hci_le_add_accept_list_sync(hdev, params, &num_entries);
 		if (err)
 			goto done;
+		hci_dev_lock(hdev);
 	}
 
 	/* After adding all new pending connections, walk through
 	 * the list of pending reports and also add these to the
 	 * accept list if there is still space. Abort if space runs out.
 	 */
-	list_for_each_entry(params, &hdev->pend_le_reports, action) {
+
+	hci_conn_params_iter_init(&hdev->pend_le_reports);
+
+	while ((params = hci_conn_params_iter_next(&hdev->pend_le_reports))) {
+		hci_dev_unlock(hdev);
 		err = hci_le_add_accept_list_sync(hdev, params, &num_entries);
 		if (err)
 			goto done;
+		hci_dev_lock(hdev);
 	}
+
+	hci_dev_unlock(hdev);
 
 	/* Use the allowlist unless the following conditions are all true:
 	 * - We are not currently suspending
