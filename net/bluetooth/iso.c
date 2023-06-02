@@ -1088,6 +1088,7 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	struct sock *sk = sock->sk;
 	struct iso_conn *conn = iso_pi(sk)->conn;
 	struct sk_buff *skb, **frag;
+	size_t mtu;
 	int err;
 
 	BT_DBG("sock %p, sk %p", sock, sk);
@@ -1099,10 +1100,16 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	if (msg->msg_flags & MSG_OOB)
 		return -EOPNOTSUPP;
 
+	lock_sock(sk);
+
 	if (sk->sk_state != BT_CONNECTED)
 		return -ENOTCONN;
 
-	skb = bt_skb_sendmsg(sk, msg, len, conn->hcon->hdev->iso_mtu,
+	mtu = conn->hcon->hdev->iso_mtu;
+
+	release_sock(sk);
+
+	skb = bt_skb_sendmsg(sk, msg, len, mtu,
 			     HCI_ISO_DATA_HDR_SIZE, 0);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
@@ -1116,8 +1123,7 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	while (len) {
 		struct sk_buff *tmp;
 
-		tmp = bt_skb_sendmsg(sk, msg, len, conn->hcon->hdev->iso_mtu,
-				     0, 0);
+		tmp = bt_skb_sendmsg(sk, msg, len, mtu, 0, 0);
 		if (IS_ERR(tmp)) {
 			kfree_skb(skb);
 			return PTR_ERR(tmp);
@@ -1172,16 +1178,18 @@ static int iso_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 	BT_DBG("sk %p", sk);
 
 	if (test_and_clear_bit(BT_SK_DEFER_SETUP, &bt_sk(sk)->flags)) {
+		lock_sock(sk);
 		switch (sk->sk_state) {
 		case BT_CONNECT2:
-			lock_sock(sk);
 			iso_conn_defer_accept(pi->conn->hcon);
 			sk->sk_state = BT_CONFIG;
 			release_sock(sk);
 			return 0;
 		case BT_CONNECT:
+			release_sock(sk);
 			return iso_connect_cis(sk);
 		}
+		release_sock(sk);
 	}
 
 	return bt_sock_recvmsg(sock, msg, len, flags);
