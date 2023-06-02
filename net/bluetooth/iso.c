@@ -119,12 +119,16 @@ static void iso_sock_clear_timer(struct sock *sk)
 }
 
 /* ---- ISO connections ---- */
+
 static struct iso_conn *iso_conn_add(struct hci_conn *hcon)
 {
 	struct iso_conn *conn = hcon->iso_data;
 
-	if (conn)
+	if (conn) {
+		if (!conn->hcon)
+			conn->hcon = hcon;
 		return conn;
+	}
 
 	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
 	if (!conn)
@@ -250,6 +254,7 @@ static inline u8 le_addr_type(u8 bdaddr_type)
 		return ADDR_LE_DEV_RANDOM;
 }
 
+/* Must be called on the locked socket. */
 static int iso_connect_bis(struct sock *sk)
 {
 	struct iso_conn *conn;
@@ -311,14 +316,9 @@ static int iso_connect_bis(struct sock *sk)
 		goto unlock;
 	}
 
-	hci_dev_unlock(hdev);
-	hci_dev_put(hdev);
-
 	err = iso_chan_add(conn, sk, NULL);
 	if (err)
-		return err;
-
-	lock_sock(sk);
+		goto unlock;
 
 	/* Update source addr of the socket */
 	bacpy(&iso_pi(sk)->src, &hcon->src);
@@ -334,15 +334,13 @@ static int iso_connect_bis(struct sock *sk)
 		iso_sock_set_timer(sk, sk->sk_sndtimeo);
 	}
 
-	release_sock(sk);
-	return err;
-
 unlock:
 	hci_dev_unlock(hdev);
 	hci_dev_put(hdev);
 	return err;
 }
 
+/* Must be called on the locked socket. */
 static int iso_connect_cis(struct sock *sk)
 {
 	struct iso_conn *conn;
@@ -403,14 +401,9 @@ static int iso_connect_cis(struct sock *sk)
 		goto unlock;
 	}
 
-	hci_dev_unlock(hdev);
-	hci_dev_put(hdev);
-
 	err = iso_chan_add(conn, sk, NULL);
 	if (err)
-		return err;
-
-	lock_sock(sk);
+		goto unlock;
 
 	/* Update source addr of the socket */
 	bacpy(&iso_pi(sk)->src, &hcon->src);
@@ -425,9 +418,6 @@ static int iso_connect_cis(struct sock *sk)
 		sk->sk_state = BT_CONNECT;
 		iso_sock_set_timer(sk, sk->sk_sndtimeo);
 	}
-
-	release_sock(sk);
-	return err;
 
 unlock:
 	hci_dev_unlock(hdev);
@@ -893,23 +883,20 @@ static int iso_sock_connect(struct socket *sock, struct sockaddr *addr,
 	bacpy(&iso_pi(sk)->dst, &sa->iso_bdaddr);
 	iso_pi(sk)->dst_type = sa->iso_bdaddr_type;
 
-	release_sock(sk);
-
 	if (bacmp(&iso_pi(sk)->dst, BDADDR_ANY))
 		err = iso_connect_cis(sk);
 	else
 		err = iso_connect_bis(sk);
 
 	if (err)
-		return err;
-
-	lock_sock(sk);
+		goto unlock;
 
 	if (!test_bit(BT_SK_DEFER_SETUP, &bt_sk(sk)->flags)) {
 		err = bt_sock_wait_state(sk, BT_CONNECTED,
 					 sock_sndtimeo(sk, flags & O_NONBLOCK));
 	}
 
+unlock:
 	release_sock(sk);
 	return err;
 }
@@ -1086,8 +1073,8 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 			    size_t len)
 {
 	struct sock *sk = sock->sk;
-	struct iso_conn *conn = iso_pi(sk)->conn;
 	struct sk_buff *skb, **frag;
+	size_t mtu;
 	int err;
 
 	BT_DBG("sock %p, sk %p", sock, sk);
@@ -1099,11 +1086,18 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	if (msg->msg_flags & MSG_OOB)
 		return -EOPNOTSUPP;
 
-	if (sk->sk_state != BT_CONNECTED)
-		return -ENOTCONN;
+	lock_sock(sk);
 
-	skb = bt_skb_sendmsg(sk, msg, len, conn->hcon->hdev->iso_mtu,
-			     HCI_ISO_DATA_HDR_SIZE, 0);
+	if (sk->sk_state != BT_CONNECTED) {
+		release_sock(sk);
+		return -ENOTCONN;
+	}
+
+	mtu = iso_pi(sk)->conn->hcon->hdev->iso_mtu;
+
+	release_sock(sk);
+
+	skb = bt_skb_sendmsg(sk, msg, len, mtu, HCI_ISO_DATA_HDR_SIZE, 0);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 
@@ -1116,8 +1110,7 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	while (len) {
 		struct sk_buff *tmp;
 
-		tmp = bt_skb_sendmsg(sk, msg, len, conn->hcon->hdev->iso_mtu,
-				     0, 0);
+		tmp = bt_skb_sendmsg(sk, msg, len, mtu, 0, 0);
 		if (IS_ERR(tmp)) {
 			kfree_skb(skb);
 			return PTR_ERR(tmp);
@@ -1168,19 +1161,25 @@ static int iso_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 {
 	struct sock *sk = sock->sk;
 	struct iso_pinfo *pi = iso_pi(sk);
+	int err;
 
 	BT_DBG("sk %p", sk);
 
 	if (test_and_clear_bit(BT_SK_DEFER_SETUP, &bt_sk(sk)->flags)) {
+		lock_sock(sk);
 		switch (sk->sk_state) {
 		case BT_CONNECT2:
-			lock_sock(sk);
 			iso_conn_defer_accept(pi->conn->hcon);
 			sk->sk_state = BT_CONFIG;
 			release_sock(sk);
 			return 0;
 		case BT_CONNECT:
-			return iso_connect_cis(sk);
+			err = iso_connect_cis(sk);
+			release_sock(sk);
+			return err;
+		default:
+			release_sock(sk);
+			break;
 		}
 	}
 
