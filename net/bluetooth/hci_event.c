@@ -3803,6 +3803,42 @@ static u8 hci_cc_le_read_buffer_size_v2(struct hci_dev *hdev, void *data,
 	return rp->status;
 }
 
+static int hci_steal_cis_handle(struct hci_conn *conn)
+{
+	struct hci_dev *hdev = conn->hdev;
+	__u16 state = conn->state;
+
+	if (conn->type != ISO_LINK || !bacmp(&conn->dst, BDADDR_ANY)) {
+		bt_dev_err(hdev, "invalid CIS for handle %u", conn->handle);
+		return -EINVAL;
+	}
+
+	if (state != BT_CONNECTED &&
+	    !test_bit(HCI_CONN_CREATE_CIS, &conn->flags)) {
+		conn->handle = hci_conn_hash_alloc_unset(hdev);
+		return 0;
+	}
+
+	/* Our bookkeeping of CIS handles is not in sync with the controller,
+	 * which should not occur. Try to recover: this implies controller
+	 * thinks the handle does not represent a connected CIS nor can there be
+	 * pending Create CIS for it, so conn should no longer exist.
+	 */
+
+	bt_dev_err(hdev, "duplicate CIS for handle %u", conn->handle);
+
+	conn->state = BT_CLOSED;
+
+	if (state == BT_CONNECTED)
+		hci_disconn_cfm(conn, HCI_ERROR_CANCELLED_BY_HOST);
+	else
+		hci_connect_cfm(conn, HCI_ERROR_CANCELLED_BY_HOST);
+
+	hci_conn_del(conn);
+
+	return 0;
+}
+
 static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 				   struct sk_buff *skb)
 {
@@ -3841,6 +3877,9 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 	 * the CIS_IDs command parameter, in the same order.
 	 */
 	for (i = 0; i < rp->num_handles; ++i) {
+		u16 handle = __le16_to_cpu(rp->handle[i]);
+		struct hci_conn *prev;
+
 		conn = hci_conn_hash_lookup_cis(hdev, NULL, 0, rp->cig_id,
 						cp->cis[i].cis_id);
 		if (!conn || !bacmp(&conn->dst, BDADDR_ANY))
@@ -3848,6 +3887,12 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 
 		if (conn->state != BT_BOUND && conn->state != BT_CONNECT)
 			continue;
+
+		prev = hci_conn_hash_lookup_handle(hdev, handle);
+		if (prev && prev != conn) {
+			if (hci_steal_cis_handle(prev))
+				continue;
+		}
 
 		conn->handle = __le16_to_cpu(rp->handle[i]);
 

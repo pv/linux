@@ -1382,6 +1382,7 @@ int hci_conn_check_create_cis(struct hci_conn *conn);
 struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 			      u8 role);
 void hci_conn_del(struct hci_conn *conn);
+u16 hci_conn_hash_alloc_unset(struct hci_dev *hdev);
 void hci_conn_hash_flush(struct hci_dev *hdev);
 void hci_conn_check_pending(struct hci_dev *hdev);
 
