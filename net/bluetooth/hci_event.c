@@ -3813,10 +3813,10 @@ static int hci_steal_cis_handle(struct hci_conn *conn)
 		return 0;
 	}
 
-	/* This is an error: our bookkeeping of CIS handles is not in sync with
-	 * the controller. Try to recover, we know now conn->handle does not
-	 * belong to conn, controller thinks it does not represent a connected
-	 * CIS, and there can be no pending Create CIS for it.
+	/* Our bookkeeping of CIS handles is not in sync with the
+	 * controller. Try to recover, we know here the controller thinks
+	 * conn->handle does not represent a connected CIS, nor can there be
+	 * valid pending Create CIS for it.
 	 */
 
 	bt_dev_err(hdev, "duplicate CIS for handle %u", conn->handle);

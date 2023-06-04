@@ -1105,6 +1105,10 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	if (sk->sk_state != BT_CONNECTED)
 		return -ENOTCONN;
 
+	WARN_ON(!conn);
+	WARN_ON(!conn->hcon);
+	WARN_ON(!conn->hcon->hdev);
+
 	mtu = conn->hcon->hdev->iso_mtu;
 
 	release_sock(sk);
