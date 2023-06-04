@@ -3806,6 +3806,40 @@ static u8 hci_cc_le_read_buffer_size_v2(struct hci_dev *hdev, void *data,
 	return rp->status;
 }
 
+static int hci_steal_cis_handle(struct hci_conn *conn)
+{
+	struct hci_dev *hdev = conn->hdev;
+	__u16 state = conn->state;
+
+	if (conn->type != ISO_LINK || !bacmp(&conn->dst, BDADDR_ANY))
+		return -EINVAL;
+
+	if (state != BT_CONNECTED &&
+	    !test_bit(HCI_CONN_CREATE_CIS, &conn->flags)) {
+		conn->handle = HCI_CONN_HANDLE_UNSET;
+		return 0;
+	}
+
+	/* This is an error: our bookkeeping of CIS handles is not in sync with
+	 * the controller. Try to recover, we know now conn->handle does not
+	 * belong to conn, controller thinks it does not represent a connected
+	 * CIS, and there can be no pending Create CIS for it.
+	 */
+
+	bt_dev_err(hdev, "duplicate CIS for handle %u", conn->handle);
+
+	conn->state = BT_CLOSED;
+
+	if (state == BT_CONNECTED)
+		hci_disconn_cfm(conn, HCI_ERROR_CANCELLED_BY_HOST);
+	else
+		hci_connect_cfm(conn, HCI_ERROR_CANCELLED_BY_HOST);
+
+	hci_conn_del(conn);
+
+	return 0;
+}
+
 static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 				   struct sk_buff *skb)
 {
@@ -3844,6 +3878,9 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 	 * the CIS_IDs command parameter, in the same order.
 	 */
 	for (i = 0; i < rp->num_handles; ++i) {
+		u16 handle = __le16_to_cpu(rp->handle[i]);
+		struct hci_conn *prev;
+
 		conn = hci_conn_hash_lookup_cis(hdev, NULL, 0, rp->cig_id,
 						cp->cis[i].cis_id);
 		if (!conn || !bacmp(&conn->dst, BDADDR_ANY))
@@ -3852,11 +3889,17 @@ static u8 hci_cc_le_set_cig_params(struct hci_dev *hdev, void *data,
 		if (conn->state != BT_BOUND && conn->state != BT_CONNECT)
 			continue;
 
+		prev = hci_conn_hash_lookup_handle(hdev, handle);
+		if (prev && prev != conn) {
+			if (hci_steal_cis_handle(prev))
+				continue;
+		}
+
 		conn->handle = __le16_to_cpu(rp->handle[i]);
 
 		bt_dev_dbg(hdev, "%p handle 0x%4.4x parent %p", conn,
 			   conn->handle, conn->parent);
-		
+
 		if (conn->state == BT_CONNECT)
 			pending = true;
 	}
