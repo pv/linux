@@ -314,11 +314,13 @@ static int iso_connect_bis(struct sock *sk)
 	hci_dev_unlock(hdev);
 	hci_dev_put(hdev);
 
-	err = iso_chan_add(conn, sk, NULL);
-	if (err)
-		return err;
-
 	lock_sock(sk);
+
+	err = iso_chan_add(conn, sk, NULL);
+	if (err) {
+		release_sock(sk);
+		return err;
+	}
 
 	/* Update source addr of the socket */
 	bacpy(&iso_pi(sk)->src, &hcon->src);
@@ -406,11 +408,13 @@ static int iso_connect_cis(struct sock *sk)
 	hci_dev_unlock(hdev);
 	hci_dev_put(hdev);
 
-	err = iso_chan_add(conn, sk, NULL);
-	if (err)
-		return err;
-
 	lock_sock(sk);
+
+	err = iso_chan_add(conn, sk, NULL);
+	if (err) {
+		release_sock(sk);
+		return err;
+	}
 
 	/* Update source addr of the socket */
 	bacpy(&iso_pi(sk)->src, &hcon->src);
