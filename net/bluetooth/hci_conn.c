@@ -1815,78 +1815,6 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 
 	memset(&data, 0, sizeof(data));
 
-	/* Allocate first still reconfigurable CIG if not set */
-	if (qos->ucast.cig == BT_ISO_QOS_CIG_UNSET) {
-		for (data.cig = 0x00; data.cig < 0xf0; data.cig++) {
-			data.count = 0;
-			data.cis = BT_ISO_QOS_CIS_UNSET;
-
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-						 BT_CONNECT, &data);
-			if (data.count)
-				continue;
-
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-						 BT_CONNECTED, &data);
-			if (!data.count)
-				break;
-		}
-
-		if (data.cig == 0xf0)
-			return false;
-
-		/* Update CIG */
-		qos->ucast.cig = data.cig;
-	} else {
-		if (qos->ucast.cig >= 0xf0)
-			return false;
-
-		/* If CIG is busy, fail early because cmd error closes conns */
-		data.cig = qos->ucast.cig;
-		data.count = 0;
-
-		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-					 BT_CONNECT, &data);
-		if (data.count)
-			return false;
-		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-					 BT_CONNECTED, &data);
-		if (data.count)
-			return false;
-	}
-
-	/* Allocate free CIS if not set */
-	if (qos->ucast.cis == BT_ISO_QOS_CIS_UNSET) {
-		for (data.cis = 0x00; data.cis < 0xf0; data.cis++) {
-			data.count = 0;
-			data.cig = qos->ucast.cig;
-
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-						 BT_BOUND, &data);
-			if (!data.count)
-				break;
-		}
-
-		if (data.cis == 0xf0)
-			return false;
-
-		/* Update CIS */
-		qos->ucast.cis = data.cis;
-	} else {
-		if (qos->ucast.cis >= 0xf0)
-			return false;
-
-		/* Check if exists */
-		data.count = 0;
-		data.cig = qos->ucast.cig;
-		data.cis = qos->ucast.cis;
-
-		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
-					 BT_BOUND, &data);
-		if (data.count)
-			return false;
-	}
-
 	/* Reprogram CIS */
 	data.pdu.cp.cig_id = qos->ucast.cig;
 	hci_cpu_to_le24(qos->ucast.out.interval, data.pdu.cp.c_interval);
@@ -1920,14 +1848,107 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 	return true;
 }
 
+static bool check_new_cis_qos(struct hci_dev *hdev, struct bt_iso_qos *qos,
+			      u8 *cig, u8 *cis)
+{
+	struct iso_list_data data;
+
+	memset(&data, 0, sizeof(data));
+
+	/* Allocate first still reconfigurable CIG if not set */
+	if (qos->ucast.cig == BT_ISO_QOS_CIG_UNSET) {
+		for (data.cig = 0x00; data.cig < 0xf0; data.cig++) {
+			data.count = 0;
+			data.cis = BT_ISO_QOS_CIS_UNSET;
+
+			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+						 BT_CONNECT, &data);
+			if (data.count)
+				continue;
+
+			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+						 BT_CONNECTED, &data);
+			if (!data.count)
+				break;
+		}
+
+		if (data.cig == 0xf0)
+			return false;
+	} else {
+		if (qos->ucast.cig >= 0xf0)
+			return false;
+
+		/* If CIG is busy, fail early because cmd error closes conns */
+		data.cig = qos->ucast.cig;
+		data.count = 0;
+
+		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+					 BT_CONNECT, &data);
+		if (data.count)
+			return false;
+		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+					 BT_CONNECTED, &data);
+		if (data.count)
+			return false;
+	}
+
+	/* Allocate free CIS if not set */
+	if (qos->ucast.cis == BT_ISO_QOS_CIS_UNSET) {
+		for (data.cis = 0x00; data.cis < 0xf0; data.cis++) {
+			data.count = 0;
+			data.cig = qos->ucast.cig;
+
+			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+						 BT_BOUND, &data);
+			if (!data.count)
+				break;
+		}
+
+		if (data.cis == 0xf0)
+			return false;
+	} else {
+		if (qos->ucast.cis >= 0xf0)
+			return false;
+
+		/* Check if exists */
+		data.count = 0;
+		data.cig = qos->ucast.cig;
+		data.cis = qos->ucast.cis;
+
+		hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+					 BT_BOUND, &data);
+		if (data.count)
+			return false;
+	}
+
+	*cig = data.cig;
+	*cis = data.cis;
+
+	return true;
+}
+
 struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 			      __u8 dst_type, struct bt_iso_qos *qos)
 {
 	struct hci_conn *cis;
+	u8 cig_id, cis_id;
 
 	cis = hci_conn_hash_lookup_cis(hdev, dst, dst_type, qos->ucast.cig,
 				       qos->ucast.cis);
-	if (!cis) {
+	if (cis) {
+		/* Check if existing CIS has valid settings */
+		if (cis->state == BT_BOUND &&
+		    !memcmp(&cis->iso_qos, qos, sizeof(*qos)))
+			return cis;
+		else if (cis->state != BT_OPEN)
+			return ERR_PTR(-EEXIST);
+
+		if (!check_new_cis_qos(hdev, qos, &cig_id, &cis_id))
+			return ERR_PTR(-EINVAL);
+	} else {
+		if (!check_new_cis_qos(hdev, qos, &cig_id, &cis_id))
+			return ERR_PTR(-EINVAL);
+
 		cis = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
 		if (!cis)
 			return ERR_PTR(-ENOMEM);
@@ -1935,13 +1956,8 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		cis->dst_type = dst_type;
 	}
 
-	if (cis->state == BT_CONNECTED)
-		return cis;
-
-	/* Check if CIS has been set and the settings matches */
-	if (cis->state == BT_BOUND &&
-	    !memcmp(&cis->iso_qos, qos, sizeof(*qos)))
-		return cis;
+	qos->ucast.cig = cig_id;
+	qos->ucast.cis = cis_id;
 
 	/* Update LINK PHYs according to QoS preference */
 	cis->le_tx_phy = qos->ucast.out.phy;
