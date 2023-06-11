@@ -5274,9 +5274,6 @@ static int hci_le_connect_cancel_sync(struct hci_dev *hdev,
 	if (test_bit(HCI_CONN_SCANNING, &conn->flags))
 		return 0;
 
-	if (test_and_set_bit(HCI_CONN_CANCEL, &conn->flags))
-		return 0;
-
 	return __hci_cmd_sync_status(hdev, HCI_OP_LE_CREATE_CONN_CANCEL,
 				     0, NULL, HCI_CMD_TIMEOUT);
 }
@@ -5332,6 +5329,14 @@ int hci_abort_conn_sync(struct hci_dev *hdev, struct hci_conn *conn, u8 reason)
 {
 	int err;
 
+	/* No hdev->lock: but only accessing dst/type (immutable) and
+	 * state/flags here, in worst case we just send some unnecessary
+	 * HCI commands.
+	 */
+
+	if (test_and_set_bit(HCI_CONN_CANCEL, &conn->flags))
+		return 0;
+
 	switch (conn->state) {
 	case BT_CONNECTED:
 	case BT_CONFIG:
@@ -5340,10 +5345,12 @@ int hci_abort_conn_sync(struct hci_dev *hdev, struct hci_conn *conn, u8 reason)
 		err = hci_connect_cancel_sync(hdev, conn);
 		/* Cleanup hci_conn object if it cannot be cancelled as it
 		 * likelly means the controller and host stack are out of sync.
+		 * Watch out for deleted conn in calling conn_failed.
 		 */
 		if (err) {
 			hci_dev_lock(hdev);
-			hci_conn_failed(conn, err);
+			if (hci_conn_is_alive(conn))
+				hci_conn_failed(conn, err);
 			hci_dev_unlock(hdev);
 		}
 		return err;
@@ -5357,16 +5364,71 @@ int hci_abort_conn_sync(struct hci_dev *hdev, struct hci_conn *conn, u8 reason)
 	return 0;
 }
 
+static bool hci_conn_hash_iter_safe(struct hci_dev *hdev,
+				    struct hci_conn **pos,
+				    struct hci_conn **next)
+{
+	struct list_head *head = &hdev->conn_hash.list;
+	struct hci_conn *entry;
+
+	/* pos and next hold ref, loop body allows hci_dev_unlock.
+	 * If the next item is deleted or moved in list, may iterate same items
+	 * multiple times or skip items.
+	 */
+
+	if (*next && !hci_conn_is_alive(*next)) {
+		/* Cursor deleted, restart iteration */
+		hci_conn_put(*pos);
+		hci_conn_put(*next);
+		*pos = *next = NULL;
+	}
+
+	if (*pos) {
+		hci_conn_put(*pos);
+		*pos = entry = *next;
+	} else {
+		entry = list_first_entry_or_null(head, struct hci_conn, list);
+		if (entry)
+			*pos = hci_conn_get(entry);
+	}
+
+	if (!entry)
+		return false;
+
+	entry = list_next_entry(entry, list);
+	if (list_entry_is_head(entry, head, list))
+		*next = NULL;
+	else
+		*next = hci_conn_get(entry);
+
+	return true;
+}
+
 static int hci_disconnect_all_sync(struct hci_dev *hdev, u8 reason)
 {
-	struct hci_conn *conn, *tmp;
+	struct hci_conn *conn = NULL, *next = NULL;
 	int err;
 
-	list_for_each_entry_safe(conn, tmp, &hdev->conn_hash.list, list) {
+	hci_dev_lock(hdev);
+
+	while (hci_conn_hash_iter_safe(hdev, &conn, &next)) {
+		if (test_bit(HCI_CONN_CANCEL, &conn->flags))
+			continue;
+
+		hci_dev_unlock(hdev);
+
 		err = hci_abort_conn_sync(hdev, conn, reason);
-		if (err)
+		if (err) {
+			hci_conn_put(conn);
+			if (next)
+				hci_conn_put(next);
 			return err;
+		}
+
+		hci_dev_lock(hdev);
 	}
+
+	hci_dev_unlock(hdev);
 
 	return 0;
 }
@@ -6252,8 +6314,10 @@ int hci_le_create_conn_sync(struct hci_dev *hdev, struct hci_conn *conn)
 				       conn->conn_timeout, NULL);
 
 done:
-	if (err == -ETIMEDOUT)
-		hci_le_connect_cancel_sync(hdev, conn);
+	if (err == -ETIMEDOUT) {
+		if (!test_and_set_bit(HCI_CONN_CANCEL, &conn->flags))
+			hci_le_connect_cancel_sync(hdev, conn);
+	}
 
 	/* Re-enable advertising after the connection attempt is finished. */
 	hci_resume_advertising_sync(hdev);
