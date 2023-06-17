@@ -1026,6 +1026,7 @@ static inline void hci_conn_hash_del(struct hci_dev *hdev, struct hci_conn *c)
 
 	list_del_rcu(&c->list);
 	synchronize_rcu();
+	INIT_LIST_HEAD(&c->list);
 
 	switch (c->type) {
 	case ACL_LINK:
@@ -1047,6 +1048,12 @@ static inline void hci_conn_hash_del(struct hci_dev *hdev, struct hci_conn *c)
 		h->iso_num--;
 		break;
 	}
+}
+
+static inline bool hci_conn_is_alive(struct hci_conn *c)
+{
+	/* Must hold hdev->lock */
+	return !list_empty(&c->list);
 }
 
 static inline unsigned int hci_conn_num(struct hci_dev *hdev, __u8 type)
