@@ -184,6 +184,7 @@ static void iso_chan_del(struct sock *sk, int err)
 	sock_set_flag(sk, SOCK_ZAPPED);
 }
 
+/* Must hold hdev->lock */
 static void iso_conn_del(struct hci_conn *hcon, int err)
 {
 	struct iso_conn *conn = hcon->iso_data;
@@ -1504,19 +1505,23 @@ static bool iso_match_big(struct sock *sk, void *data)
 static void iso_conn_ready(struct iso_conn *conn)
 {
 	struct sock *parent;
-	struct sock *sk = conn->sk;
+	struct sock *sk;
 	struct hci_ev_le_big_sync_estabilished *ev;
 	struct hci_conn *hcon;
 
 	BT_DBG("conn %p", conn);
 
-	if (sk) {
-		iso_sock_ready(conn->sk);
-	} else {
-		hcon = conn->hcon;
-		if (!hcon)
-			return;
+	iso_conn_lock(conn);
+	hcon = conn->hcon;
+	sk = conn->sk;
+	if (sk)
+		sock_hold(sk);
+	iso_conn_unlock(conn);
 
+	if (sk) {
+		iso_sock_ready(sk);
+		sock_put(sk);
+	} else if (hcon) {
 		ev = hci_recv_event_data(hcon->hdev,
 					 HCI_EVT_LE_BIG_SYNC_ESTABILISHED);
 		if (ev)
@@ -1557,7 +1562,10 @@ static void iso_conn_ready(struct iso_conn *conn)
 		bacpy(&iso_pi(sk)->dst, &hcon->dst);
 		iso_pi(sk)->dst_type = hcon->dst_type;
 
-		hci_conn_hold(hcon);
+		iso_conn_lock(conn);
+		conn->hcon = hci_conn_hold(hcon);
+		iso_conn_unlock(conn);
+
 		iso_chan_add(conn, sk, parent);
 
 		if (ev && ((struct hci_evt_le_big_sync_estabilished *)ev)->status) {
