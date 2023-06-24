@@ -1076,11 +1076,42 @@ static inline unsigned int hci_conn_count(struct hci_dev *hdev)
 	return c->acl_num + c->amp_num + c->sco_num + c->le_num + c->iso_num;
 }
 
+#ifdef CONFIG_PROVE_RCU
+
+static inline bool hci_conn_hash_lockdep_check(struct hci_dev *hdev)
+{
+	struct work_struct *work;
+
+	if (lockdep_is_held(&hdev->lock) || rcu_read_lock_held())
+		return true;
+
+	/* hdev->workqueue counts as critical section for hci_conn deletion; we
+	 * assume hci_conn_del shall either only be called from that workqueue
+	 * or that workqueue is prevented from running when it is called from
+	 * elsewhere.  Since there's no public API for getting current
+	 * workqueue, just check a partial list of "safe" general-purpose works
+	 * that we allow.
+	 */
+	work = current_work();
+	return work == &hdev->rx_work || work == &hdev->tx_work ||
+		work == &hdev->cmd_work;
+}
+
+#define HCI_CONN_HASH_LOCKDEP_CHECK(hdev)			\
+	RCU_LOCKDEP_WARN(!hci_conn_hash_lockdep_check(hdev),	\
+			 "unsafe hci_conn_hash lookup without locking")
+
+#else
+#define HCI_CONN_HASH_LOCKDEP_CHECK(hdev) do { } while (0)
+#endif
+
 static inline __u8 hci_conn_lookup_type(struct hci_dev *hdev, __u16 handle)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn *c;
 	__u8 type = INVALID_LINK;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
@@ -1101,6 +1132,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_bis(struct hci_dev *hdev,
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
@@ -1126,6 +1159,8 @@ hci_conn_hash_lookup_per_adv_bis(struct hci_dev *hdev,
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
 
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
+
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(c, &h->list, list) {
@@ -1150,6 +1185,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_handle(struct hci_dev *hdev,
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
 
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
+
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(c, &h->list, list) {
@@ -1168,6 +1205,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_ba(struct hci_dev *hdev,
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
@@ -1189,6 +1228,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_le(struct hci_dev *hdev,
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
@@ -1215,6 +1256,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_cis(struct hci_dev *hdev,
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
@@ -1248,6 +1291,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_cig(struct hci_dev *hdev,
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
 
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
+
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(c, &h->list, list) {
@@ -1270,6 +1315,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_big(struct hci_dev *hdev,
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
@@ -1317,6 +1364,8 @@ static inline struct hci_conn *hci_conn_hash_lookup_state(struct hci_dev *hdev,
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
 
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
+
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(c, &h->list, list) {
@@ -1356,6 +1405,8 @@ static inline struct hci_conn *hci_lookup_le_connect(struct hci_dev *hdev)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
 	struct hci_conn  *c;
+
+	HCI_CONN_HASH_LOCKDEP_CHECK(hdev);
 
 	rcu_read_lock();
 
