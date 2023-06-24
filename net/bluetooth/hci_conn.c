@@ -142,6 +142,10 @@ static void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status)
 static void hci_conn_cleanup(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
+	u8 type = conn->type;
+
+	if (WARN_ON(test_and_set_bit(HCI_CONN_DELETED, &conn->flags)))
+		return;
 
 	if (test_bit(HCI_CONN_PARAM_REMOVAL_PEND, &conn->flags))
 		hci_conn_params_del(conn->hdev, &conn->dst, conn->dst_type);
@@ -151,12 +155,14 @@ static void hci_conn_cleanup(struct hci_conn *conn)
 
 	hci_chan_list_flush(conn);
 
-	hci_conn_hash_del(hdev, conn);
+	hci_conn_hash_drop(hdev, conn);
+	conn->state = BT_CLOSED;
+	conn->handle = HCI_CONN_HANDLE_UNSET;
 
 	if (conn->cleanup)
 		conn->cleanup(conn);
 
-	if (conn->type == SCO_LINK || conn->type == ESCO_LINK) {
+	if (type == SCO_LINK || type == ESCO_LINK) {
 		switch (conn->setting & SCO_AIRMODE_MASK) {
 		case SCO_AIRMODE_CVSD:
 		case SCO_AIRMODE_TRANSP:
@@ -173,9 +179,20 @@ static void hci_conn_cleanup(struct hci_conn *conn)
 
 	debugfs_remove_recursive(conn->debugfs);
 
-	hci_dev_put(hdev);
-
+	/* Deleted from conn_hash.list only in hci_conn_release */
 	hci_conn_put(conn);
+}
+
+static void hci_conn_release(struct device *dev)
+{
+	struct hci_conn *conn = container_of(dev, struct hci_conn, dev);
+	struct hci_dev *hdev = conn->hdev;
+
+	WARN_ON(!test_bit(HCI_CONN_DELETED, &conn->flags));
+
+	hci_conn_hash_del(hdev, conn);
+
+	hci_dev_put(hdev);
 }
 
 static void le_scan_cleanup(struct work_struct *work)
@@ -183,21 +200,13 @@ static void le_scan_cleanup(struct work_struct *work)
 	struct hci_conn *conn = container_of(work, struct hci_conn,
 					     le_scan_cleanup);
 	struct hci_dev *hdev = conn->hdev;
-	struct hci_conn *c = NULL;
 
 	BT_DBG("%s hcon %p", hdev->name, conn);
 
 	hci_dev_lock(hdev);
 
 	/* Check that the hci_conn is still around */
-	rcu_read_lock();
-	list_for_each_entry_rcu(c, &hdev->conn_hash.list, list) {
-		if (c == conn)
-			break;
-	}
-	rcu_read_unlock();
-
-	if (c == conn) {
+	if (!test_bit(HCI_CONN_DELETED, &conn->flags)) {
 		hci_connect_le_scan_cleanup(conn, 0x00);
 		hci_conn_cleanup(conn);
 	}
@@ -1083,7 +1092,7 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 			hdev->notify(hdev, HCI_NOTIFY_CONN_ADD);
 	}
 
-	hci_conn_init_sysfs(conn);
+	hci_conn_init_sysfs(conn, hci_conn_release);
 
 	return conn;
 }
@@ -1143,6 +1152,9 @@ void hci_conn_del(struct hci_conn *conn)
 
 	BT_DBG("%s hcon %p handle %d", hdev->name, conn, conn->handle);
 
+	if (WARN_ON(test_bit(HCI_CONN_DELETED, &conn->flags)))
+		return;
+
 	hci_conn_unlink(conn);
 
 	cancel_delayed_work_sync(&conn->disc_work);
@@ -1176,10 +1188,9 @@ void hci_conn_del(struct hci_conn *conn)
 
 	skb_queue_purge(&conn->data_q);
 
-	/* Remove the connection from the list and cleanup its remaining
-	 * state. This is a separate function since for some cases like
-	 * BT_CONNECT_SCAN we *only* want the cleanup part without the
-	 * rest of hci_conn_del.
+	/* Cleanup the connection and its remaining state. This is a separate
+	 * function since for some cases like BT_CONNECT_SCAN we *only* want the
+	 * cleanup part without the rest of hci_conn_del.
 	 */
 	hci_conn_cleanup(conn);
 }
@@ -2540,25 +2551,22 @@ timer:
 				   msecs_to_jiffies(hdev->idle_timeout));
 }
 
-/* Drop all connection on the device */
+static void flush_conn_hash(struct hci_conn *conn, void *data)
+{
+	if (test_bit(HCI_CONN_DELETED, &conn->flags))
+		return;
+
+	conn->state = BT_CLOSED;
+	hci_disconn_cfm(conn, HCI_ERROR_LOCAL_HOST_TERM);
+	hci_conn_del(conn);
+}
+
+/* Drop all connection on the device. Must hold hdev->lock */
 void hci_conn_hash_flush(struct hci_dev *hdev)
 {
-	struct list_head *head = &hdev->conn_hash.list;
-	struct hci_conn *conn;
-
 	BT_DBG("hdev %s", hdev->name);
 
-	/* We should not traverse the list here, because hci_conn_del
-	 * can remove extra links, which may cause the list traversal
-	 * to hit items that have already been released.
-	 */
-	while ((conn = list_first_entry_or_null(head,
-						struct hci_conn,
-						list)) != NULL) {
-		conn->state = BT_CLOSED;
-		hci_disconn_cfm(conn, HCI_ERROR_LOCAL_HOST_TERM);
-		hci_conn_del(conn);
-	}
+	hci_conn_hash_list_safe_unlocked(hdev, flush_conn_hash, NULL);
 }
 
 /* Check pending connect attempts */
@@ -2967,4 +2975,41 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 	}
 
 	return r;
+}
+
+/* Iterate over conn_hash, calling func without extra locks. Holds ref on
+ * iteration cursor, so any connection can be deleted or added in callback or
+ * concurrently.
+ */
+void hci_conn_hash_list_safe_unlocked(struct hci_dev *hdev,
+				      hci_conn_func_t func, void *data)
+{
+	struct hci_conn *pos, *prev = NULL;
+
+	if (!func)
+		return;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(pos, &hdev->conn_hash.list, list) {
+		/* Keep cursor in the list */
+		if (!hci_conn_get_unless_zero(pos))
+			continue;
+
+		rcu_read_unlock();
+
+		if (prev) {
+			hci_conn_put(prev);
+			prev = pos;
+		}
+
+		func(pos, data);
+
+		rcu_read_lock();
+	}
+
+	rcu_read_unlock();
+
+	if (prev)
+		hci_conn_put(prev);
 }

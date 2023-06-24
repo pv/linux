@@ -31,7 +31,8 @@ static int __match_tty(struct device *dev, void *data)
 	return !strncmp(dev_name(dev), "rfcomm", 6);
 }
 
-void hci_conn_init_sysfs(struct hci_conn *conn)
+void hci_conn_init_sysfs(struct hci_conn *conn,
+			 void (*release)(struct device *dev))
 {
 	struct hci_dev *hdev = conn->hdev;
 
@@ -40,6 +41,7 @@ void hci_conn_init_sysfs(struct hci_conn *conn)
 	conn->dev.type = &bt_link;
 	conn->dev.class = &bt_class;
 	conn->dev.parent = &hdev->dev;
+	conn->dev.release = release;
 
 	device_initialize(&conn->dev);
 }
@@ -49,6 +51,8 @@ void hci_conn_add_sysfs(struct hci_conn *conn)
 	struct hci_dev *hdev = conn->hdev;
 
 	BT_DBG("conn %p", conn);
+
+	WARN_ON(test_bit(HCI_CONN_DELETED, &conn->flags));
 
 	if (device_is_registered(&conn->dev))
 		return;

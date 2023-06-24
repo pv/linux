@@ -1245,6 +1245,8 @@ void hci_debugfs_create_conn(struct hci_conn *conn)
 	struct hci_dev *hdev = conn->hdev;
 	char name[6];
 
+	WARN_ON(test_bit(HCI_CONN_DELETED, &conn->flags));
+
 	if (IS_ERR_OR_NULL(hdev->debugfs) || conn->debugfs)
 		return;
 

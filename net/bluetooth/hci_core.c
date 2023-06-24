@@ -2528,6 +2528,7 @@ struct hci_dev *hci_alloc_dev_priv(int sizeof_priv)
 
 	mutex_init(&hdev->lock);
 	mutex_init(&hdev->req_lock);
+	spin_lock_init(&hdev->conn_hash.lock);
 
 	INIT_LIST_HEAD(&hdev->mesh_pending);
 	INIT_LIST_HEAD(&hdev->mgmt_pending);

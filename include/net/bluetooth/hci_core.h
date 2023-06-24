@@ -125,6 +125,8 @@ enum suspended_state {
 
 struct hci_conn_hash {
 	struct list_head list;
+	/* @lock: spinlock protecting the RCU list */
+	spinlock_t       lock;
 	unsigned int     acl_num;
 	unsigned int     amp_num;
 	unsigned int     sco_num;
@@ -978,6 +980,7 @@ enum {
 	HCI_CONN_PER_ADV,
 	HCI_CONN_BIG_CREATED,
 	HCI_CONN_CREATE_CIS,
+	HCI_CONN_DELETED,
 };
 
 static inline bool hci_conn_ssp_enabled(struct hci_conn *conn)
@@ -997,7 +1000,9 @@ static inline bool hci_conn_sc_enabled(struct hci_conn *conn)
 static inline void hci_conn_hash_add(struct hci_dev *hdev, struct hci_conn *c)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
+	spin_lock(&h->lock);
 	list_add_tail_rcu(&c->list, &h->list);
+	spin_unlock(&h->lock);
 	switch (c->type) {
 	case ACL_LINK:
 		h->acl_num++;
@@ -1020,13 +1025,9 @@ static inline void hci_conn_hash_add(struct hci_dev *hdev, struct hci_conn *c)
 	}
 }
 
-static inline void hci_conn_hash_del(struct hci_dev *hdev, struct hci_conn *c)
+static inline void hci_conn_hash_drop(struct hci_dev *hdev, struct hci_conn *c)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
-
-	list_del_rcu(&c->list);
-	synchronize_rcu();
-
 	switch (c->type) {
 	case ACL_LINK:
 		h->acl_num--;
@@ -1047,6 +1048,20 @@ static inline void hci_conn_hash_del(struct hci_dev *hdev, struct hci_conn *c)
 		h->iso_num--;
 		break;
 	}
+	c->type = INVALID_LINK;
+}
+
+static inline void hci_conn_hash_del(struct hci_dev *hdev, struct hci_conn *c)
+{
+	struct hci_conn_hash *h = &hdev->conn_hash;
+
+	WARN_ON(!test_bit(HCI_CONN_DELETED, &c->flags));
+
+	spin_lock(&h->lock);
+	list_del_rcu(&c->list);
+	spin_unlock(&h->lock);
+
+	synchronize_rcu();
 }
 
 static inline unsigned int hci_conn_num(struct hci_dev *hdev, __u8 type)
@@ -1376,6 +1391,9 @@ static inline struct hci_conn *hci_lookup_le_connect(struct hci_dev *hdev)
 	return NULL;
 }
 
+void hci_conn_hash_list_safe_unlocked(struct hci_dev *hdev,
+				      hci_conn_func_t func, void *data);
+
 int hci_disconnect(struct hci_conn *conn, __u8 reason);
 bool hci_setup_sync(struct hci_conn *conn, __u16 handle);
 void hci_sco_setup(struct hci_conn *conn, __u8 status);
@@ -1440,6 +1458,15 @@ void hci_conn_failed(struct hci_conn *conn, u8 status);
  * it is still running. As soon as you release the locks, the connection might
  * get dropped, though.
  *
+ * The hci_conn is removed from conn_hash.list only at the end of its lifetime,
+ * and may be used for conn_hash iteration as long as you hold a reference.  In
+ * RCU critical sections you cannot use hci_conn_get or hci_conn_put, only
+ * hci_conn_get_unless_zero can be used.
+ *
+ * Each hci_conn_add must be matched with a hci_conn_del/cleanup which cleans up
+ * various resources, sets conn->type == INVALID_LINK and a HCI_CONN_DELETED
+ * flag. They do nothing if HCI_CONN_DELETED was already set.
+ *
  * On the other hand, hci_conn_hold() and hci_conn_drop() are used to control
  * how long the underlying connection is held. So every channel that runs on the
  * hci_conn object calls this to prevent the connection from disappearing. As
@@ -1457,6 +1484,11 @@ static inline struct hci_conn *hci_conn_get(struct hci_conn *conn)
 	return conn;
 }
 
+static inline struct hci_conn * __must_check hci_conn_get_unless_zero(struct hci_conn *conn)
+{
+	return kobject_get_unless_zero(&conn->dev.kobj) ? conn : NULL;
+}
+
 static inline void hci_conn_put(struct hci_conn *conn)
 {
 	put_device(&conn->dev);
@@ -1465,6 +1497,8 @@ static inline void hci_conn_put(struct hci_conn *conn)
 static inline struct hci_conn *hci_conn_hold(struct hci_conn *conn)
 {
 	BT_DBG("hcon %p orig refcnt %d", conn, atomic_read(&conn->refcnt));
+
+	WARN_ON(test_bit(HCI_CONN_DELETED, &conn->flags));
 
 	atomic_inc(&conn->refcnt);
 	cancel_delayed_work(&conn->disc_work);
@@ -1709,7 +1743,8 @@ int hci_get_adv_monitor_offload_ext(struct hci_dev *hdev);
 void hci_event_packet(struct hci_dev *hdev, struct sk_buff *skb);
 
 void hci_init_sysfs(struct hci_dev *hdev);
-void hci_conn_init_sysfs(struct hci_conn *conn);
+void hci_conn_init_sysfs(struct hci_conn *conn,
+			 void (*release)(struct device *dev));
 void hci_conn_add_sysfs(struct hci_conn *conn);
 void hci_conn_del_sysfs(struct hci_conn *conn);
 
