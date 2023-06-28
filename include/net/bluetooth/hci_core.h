@@ -760,7 +760,7 @@ struct hci_conn {
 	struct delayed_work auto_accept_work;
 	struct delayed_work idle_work;
 	struct delayed_work le_conn_timeout;
-	struct work_struct  le_scan_cleanup;
+	struct work_struct  cleanup_work;
 
 	struct device	dev;
 	struct dentry	*debugfs;
@@ -1447,7 +1447,10 @@ static inline struct hci_conn *hci_conn_hold(struct hci_conn *conn)
 
 static inline void hci_conn_drop(struct hci_conn *conn)
 {
-	BT_DBG("hcon %p orig refcnt %d", conn, atomic_read(&conn->refcnt));
+	int refcnt = atomic_read(&conn->refcnt);
+
+	BT_DBG("hcon %p orig refcnt %d", conn, refcnt);
+	WARN_ON(!refcnt);
 
 	if (atomic_dec_and_test(&conn->refcnt)) {
 		unsigned long timeo;

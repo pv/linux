@@ -139,9 +139,12 @@ static void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status)
 	hci_update_passive_scan(hdev);
 }
 
-static void hci_conn_cleanup(struct hci_conn *conn)
+static void hci_conn_cleanup(struct hci_conn *conn, bool check_refcnt)
 {
 	struct hci_dev *hdev = conn->hdev;
+
+	if (check_refcnt && atomic_read(&conn->refcnt) > 0)
+		return;
 
 	if (test_bit(HCI_CONN_PARAM_REMOVAL_PEND, &conn->flags))
 		hci_conn_params_del(conn->hdev, &conn->dst, conn->dst_type);
@@ -178,10 +181,10 @@ static void hci_conn_cleanup(struct hci_conn *conn)
 	hci_conn_put(conn);
 }
 
-static void le_scan_cleanup(struct work_struct *work)
+static void cleanup_work(struct work_struct *work)
 {
 	struct hci_conn *conn = container_of(work, struct hci_conn,
-					     le_scan_cleanup);
+					     cleanup_work);
 	struct hci_dev *hdev = conn->hdev;
 	struct hci_conn *c = NULL;
 
@@ -189,25 +192,22 @@ static void le_scan_cleanup(struct work_struct *work)
 
 	hci_dev_lock(hdev);
 
-	/* Check that the hci_conn is still around */
-	rcu_read_lock();
-	list_for_each_entry_rcu(c, &hdev->conn_hash.list, list) {
-		if (c == conn)
-			break;
-	}
-	rcu_read_unlock();
+	if (!atomic_dec_and_test(&conn->refcnt))
+		goto unlock;
 
-	if (c == conn) {
+	if (conn->type == LE_LINK &&
+	    test_bit(HCI_CONN_SCANNING, &conn->flags)) {
 		hci_connect_le_scan_cleanup(conn, 0x00);
-		hci_conn_cleanup(conn);
+		hci_conn_cleanup(conn, true);
+	} else {
+		hci_conn_del(conn);
 	}
 
+unlock:
 	hci_dev_unlock(hdev);
-	hci_dev_put(hdev);
-	hci_conn_put(conn);
 }
 
-static void hci_connect_le_scan_remove(struct hci_conn *conn)
+static void hci_conn_start_cleanup(struct hci_conn *conn)
 {
 	BT_DBG("%s hcon %p", conn->hdev->name, conn);
 
@@ -220,13 +220,13 @@ static void hci_connect_le_scan_remove(struct hci_conn *conn)
 	 */
 
 	hci_dev_hold(conn->hdev);
-	hci_conn_get(conn);
+	hci_conn_hold(conn);
 
 	/* Even though we hold a reference to the hdev, many other
 	 * things might get cleaned up meanwhile, including the hdev's
 	 * own workqueue, so we can't use that for scheduling.
 	 */
-	schedule_work(&conn->le_scan_cleanup);
+	schedule_work(&conn->cleanup_work);
 }
 
 static void hci_acl_create_connection(struct hci_conn *conn)
@@ -663,10 +663,14 @@ static void hci_conn_timeout(struct work_struct *work)
 {
 	struct hci_conn *conn = container_of(work, struct hci_conn,
 					     disc_work.work);
-	int refcnt = atomic_read(&conn->refcnt);
+	struct hci_dev *hdev = conn->hdev;
+	int refcnt;
+
+	hci_dev_lock(hdev);
 
 	BT_DBG("hcon %p state %s", conn, state_to_string(conn->state));
 
+	refcnt = atomic_read(&conn->refcnt);
 	WARN_ON(refcnt < 0);
 
 	/* FIXME: It was observed that in pairing failed scenario, refcnt
@@ -677,16 +681,21 @@ static void hci_conn_timeout(struct work_struct *work)
 	 * otherwise drop it.
 	 */
 	if (refcnt > 0)
-		return;
+		goto unlock;
 
-	/* LE connections in scanning state need special handling */
 	if (conn->state == BT_CONNECT && conn->type == LE_LINK &&
-	    test_bit(HCI_CONN_SCANNING, &conn->flags)) {
-		hci_connect_le_scan_remove(conn);
-		return;
-	}
+	    test_bit(HCI_CONN_SCANNING, &conn->flags))
+		conn->state = BT_CLOSED;
 
 	hci_abort_conn(conn, hci_proto_disconn_ind(conn));
+
+	if (conn->state == BT_CLOSED) {
+		hci_disconn_cfm(conn, HCI_ERROR_LOCAL_HOST_TERM);
+		hci_conn_start_cleanup(conn);
+	}
+
+unlock:
+	hci_dev_unlock(hdev);
 }
 
 /* Enter sniff mode */
@@ -1066,7 +1075,7 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
 	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
 	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
-	INIT_WORK(&conn->le_scan_cleanup, le_scan_cleanup);
+	INIT_WORK(&conn->cleanup_work, cleanup_work);
 
 	atomic_set(&conn->refcnt, 0);
 
@@ -1116,8 +1125,11 @@ static void hci_conn_unlink(struct hci_conn *conn)
 			 */
 			if ((child->type == SCO_LINK ||
 			     child->type == ESCO_LINK) &&
-			    child->handle == HCI_CONN_HANDLE_UNSET)
+			     child->handle == HCI_CONN_HANDLE_UNSET) {
+				hci_connect_cfm(child,
+						HCI_ERROR_LOCAL_HOST_TERM);
 				hci_conn_del(child);
+			}
 		}
 
 		return;
@@ -1140,6 +1152,9 @@ static void hci_conn_unlink(struct hci_conn *conn)
 void hci_conn_del(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
+
+	if (atomic_read(&conn->refcnt) > 0)
+		return;
 
 	BT_DBG("%s hcon %p handle %d", hdev->name, conn, conn->handle);
 
@@ -1181,7 +1196,7 @@ void hci_conn_del(struct hci_conn *conn)
 	 * BT_CONNECT_SCAN we *only* want the cleanup part without the
 	 * rest of hci_conn_del.
 	 */
-	hci_conn_cleanup(conn);
+	hci_conn_cleanup(conn, false);
 }
 
 struct hci_dev *hci_get_route(bdaddr_t *dst, bdaddr_t *src, uint8_t src_type)
@@ -2932,6 +2947,7 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 					 HCI_OP_CREATE_CONN_CANCEL,
 					 6, &conn->dst);
 		}
+		conn->state = BT_CLOSED;
 		break;
 	case BT_CONNECT2:
 		if (conn->type == ACL_LINK) {
@@ -2960,6 +2976,7 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 					 HCI_OP_REJECT_SYNC_CONN_REQ,
 					 sizeof(rej), &rej);
 		}
+		conn->state = BT_CLOSED;
 		break;
 	default:
 		conn->state = BT_CLOSED;
