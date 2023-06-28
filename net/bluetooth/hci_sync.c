@@ -873,6 +873,20 @@ static bool adv_use_rpa(struct hci_dev *hdev, uint32_t flags)
 	return true;
 }
 
+static bool hci_check_le_connect(struct hci_dev *hdev)
+{
+	struct hci_conn *conn;
+
+	rcu_read_lock();
+	conn = hci_lookup_le_connect(hdev);
+	rcu_read_unlock();
+
+	/* The return value may be wrong under race conditions, as the
+	 * conn may be already deleted
+	 */
+	return conn;
+}
+
 static int hci_set_random_addr_sync(struct hci_dev *hdev, bdaddr_t *rpa)
 {
 	/* If we're advertising or initiating an LE connection we can't
@@ -886,7 +900,7 @@ static int hci_set_random_addr_sync(struct hci_dev *hdev, bdaddr_t *rpa)
 	 * address be updated at the next cycle.
 	 */
 	if (hci_dev_test_flag(hdev, HCI_LE_ADV) ||
-	    hci_lookup_le_connect(hdev)) {
+	    hci_check_le_connect(hdev)) {
 		bt_dev_dbg(hdev, "Deferring random address update");
 		hci_dev_set_flag(hdev, HCI_RPA_EXPIRED);
 		return 0;
@@ -2435,7 +2449,7 @@ static int hci_pause_addr_resolution(struct hci_dev *hdev)
 	 * when initiating an LE connection.
 	 */
 	if (hci_dev_test_flag(hdev, HCI_LE_SCAN) ||
-	    hci_lookup_le_connect(hdev)) {
+	    hci_check_le_connect(hdev)) {
 		bt_dev_err(hdev, "Command not allowed when scan/LE connect");
 		return -EPERM;
 	}
@@ -2570,16 +2584,21 @@ static u8 hci_update_accept_list_sync(struct hci_dev *hdev)
 	 * the controller.
 	 */
 	list_for_each_entry_safe(b, t, &hdev->le_accept_list, list) {
-		if (hci_conn_hash_lookup_le(hdev, &b->bdaddr, b->bdaddr_type))
-			continue;
+		rcu_read_lock();
 
-		/* Pointers not dereferenced, no locks needed */
+		if (hci_conn_hash_lookup_le(hdev, &b->bdaddr, b->bdaddr_type)) {
+			rcu_read_unlock();
+			continue;
+		}
+
 		pend_conn = hci_pend_le_action_lookup(&hdev->pend_le_conns,
 						      &b->bdaddr,
 						      b->bdaddr_type);
 		pend_report = hci_pend_le_action_lookup(&hdev->pend_le_reports,
 							&b->bdaddr,
 							b->bdaddr_type);
+
+		rcu_read_unlock();
 
 		/* If the device is not likely to connect or report,
 		 * remove it from the acceptlist.
@@ -2930,7 +2949,7 @@ int hci_update_passive_scan_sync(struct hci_dev *hdev)
 		 * since some controllers are not able to scan and connect at
 		 * the same time.
 		 */
-		if (hci_lookup_le_connect(hdev))
+		if (hci_check_le_connect(hdev))
 			return 0;
 
 		bt_dev_dbg(hdev, "start background scanning");
@@ -3150,12 +3169,20 @@ static bool disconnected_accept_list_entries(struct hci_dev *hdev)
 	list_for_each_entry(b, &hdev->accept_list, list) {
 		struct hci_conn *conn;
 
-		conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &b->bdaddr);
-		if (!conn)
-			return true;
+		rcu_read_lock();
 
-		if (conn->state != BT_CONNECTED && conn->state != BT_CONFIG)
+		conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &b->bdaddr);
+		if (!conn) {
+			rcu_read_unlock();
 			return true;
+		}
+
+		if (conn->state != BT_CONNECTED && conn->state != BT_CONFIG) {
+			rcu_read_unlock();
+			return true;
+		}
+
+		rcu_read_unlock();
 	}
 
 	return false;
