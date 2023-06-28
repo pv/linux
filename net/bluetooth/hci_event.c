@@ -4420,17 +4420,25 @@ static void hci_num_comp_pkts_evt(struct hci_dev *hdev, void *data,
 		struct hci_comp_pkts_info *info = &ev->handles[i];
 		struct hci_conn *conn;
 		__u16  handle, count;
+		__u8 type;
 
 		handle = __le16_to_cpu(info->handle);
 		count  = __le16_to_cpu(info->count);
 
+		rcu_read_lock();
+
 		conn = hci_conn_hash_lookup_handle(hdev, handle);
-		if (!conn)
+		if (!conn) {
+			rcu_read_unlock();
 			continue;
+		}
 
 		conn->sent -= count;
+		type = conn->type;
 
-		switch (conn->type) {
+		rcu_read_unlock();
+
+		switch (type) {
 		case ACL_LINK:
 			hdev->acl_cnt += count;
 			if (hdev->acl_cnt > hdev->acl_pkts)
@@ -4473,7 +4481,7 @@ static void hci_num_comp_pkts_evt(struct hci_dev *hdev, void *data,
 
 		default:
 			bt_dev_err(hdev, "unknown type %d conn %p",
-				   conn->type, conn);
+				   type, conn);
 			break;
 		}
 	}
