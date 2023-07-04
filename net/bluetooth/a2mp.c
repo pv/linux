@@ -576,6 +576,8 @@ static int a2mp_discphyslink_req(struct amp_mgr *mgr, struct sk_buff *skb,
 		goto send_rsp;
 	}
 
+	hci_dev_lock(hdev);
+
 	hcon = hci_conn_hash_lookup_ba(hdev, AMP_LINK,
 				       &mgr->l2cap_conn->hcon->dst);
 	if (!hcon) {
@@ -587,6 +589,7 @@ static int a2mp_discphyslink_req(struct amp_mgr *mgr, struct sk_buff *skb,
 	/* TODO Disconnect Phys Link here */
 
 clean:
+	hci_dev_unlock(hdev);
 	hci_dev_put(hdev);
 
 send_rsp:
@@ -1014,6 +1017,8 @@ void a2mp_send_create_phy_link_rsp(struct hci_dev *hdev, u8 status)
 
 	memset(&rsp, 0, sizeof(rsp));
 
+	rcu_read_lock();
+
 	hs_hcon = hci_conn_hash_lookup_state(hdev, AMP_LINK, BT_CONNECT);
 	if (!hs_hcon) {
 		rsp.status = A2MP_STATUS_UNABLE_START_LINK_CREATION;
@@ -1021,6 +1026,8 @@ void a2mp_send_create_phy_link_rsp(struct hci_dev *hdev, u8 status)
 		rsp.remote_id = hs_hcon->remote_id;
 		rsp.status = A2MP_STATUS_SUCCESS;
 	}
+
+	rcu_read_unlock();
 
 	BT_DBG("%s mgr %p hs_hcon %p status %u", hdev->name, mgr, hs_hcon,
 	       status);

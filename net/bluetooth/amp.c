@@ -385,15 +385,20 @@ static bool amp_write_rem_assoc_frag(struct hci_dev *hdev,
 void amp_write_rem_assoc_continue(struct hci_dev *hdev, u8 handle)
 {
 	struct hci_conn *hcon;
+	bool res = false;
 
 	BT_DBG("%s phy handle 0x%2.2x", hdev->name, handle);
 
+	hci_dev_lock(hdev);
+
 	hcon = hci_conn_hash_lookup_handle(hdev, handle);
-	if (!hcon)
-		return;
+	if (hcon)
+		res = amp_write_rem_assoc_frag(hdev, hcon);
+
+	hci_dev_unlock(hdev);
 
 	/* Send A2MP create phylink rsp when all fragments are written */
-	if (amp_write_rem_assoc_frag(hdev, hcon))
+	if (res)
 		a2mp_send_create_phy_link_rsp(hdev, 0);
 }
 
@@ -474,7 +479,9 @@ static void accept_phylink_complete(struct hci_dev *hdev, u8 status,
 	if (!cp)
 		return;
 
+	hci_dev_lock(hdev);
 	amp_write_remote_assoc(hdev, cp->phy_handle);
+	hci_dev_unlock(hdev);
 }
 
 void amp_accept_phylink(struct hci_dev *hdev, struct amp_mgr *mgr,
