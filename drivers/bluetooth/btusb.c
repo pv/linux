@@ -1203,11 +1203,18 @@ static bool btusb_validate_sco_handle(struct hci_dev *hdev,
 
 	handle = hci_handle(__le16_to_cpu(hdr->handle));
 
+	/* Ignore race condition with handles coming and going, at worst we
+	 * drop some data.
+	 */
+	rcu_read_lock();
+
 	switch (hci_conn_lookup_type(hdev, handle)) {
 	case SCO_LINK:
 	case ESCO_LINK:
+		rcu_read_unlock();
 		return true;
 	default:
+		rcu_read_unlock();
 		return false;
 	}
 }
