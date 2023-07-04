@@ -1236,13 +1236,13 @@ static void create_le_conn_complete(struct hci_dev *hdev, void *data, int err)
 	struct hci_conn *conn;
 	u16 handle = PTR_ERR(data);
 
+	hci_dev_lock(hdev);
+
 	conn = hci_conn_hash_lookup_handle(hdev, handle);
 	if (!conn)
-		return;
+		goto done;
 
 	bt_dev_dbg(hdev, "err %d", err);
-
-	hci_dev_lock(hdev);
 
 	if (!err) {
 		hci_connect_le_scan_cleanup(conn, 0x00);
@@ -1265,8 +1265,14 @@ static int hci_connect_le_sync(struct hci_dev *hdev, void *data)
 {
 	struct hci_conn *conn;
 	u16 handle = PTR_ERR(data);
+	int res;
 
+	rcu_read_lock();
 	conn = hci_conn_hash_lookup_handle(hdev, handle);
+	if (conn)
+		hci_conn_get(conn);
+	rcu_read_unlock();
+
 	if (!conn)
 		return 0;
 
@@ -1274,7 +1280,10 @@ static int hci_connect_le_sync(struct hci_dev *hdev, void *data)
 
 	conn->state = BT_CONNECT;
 
-	return hci_le_create_conn_sync(hdev, conn);
+	res = hci_le_create_conn_sync(hdev, conn);
+	hci_conn_put(conn);
+
+	return res;
 }
 
 struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
@@ -2855,12 +2864,21 @@ static int abort_conn_sync(struct hci_dev *hdev, void *data)
 {
 	struct hci_conn *conn;
 	u16 handle = PTR_ERR(data);
+	int res;
 
+	rcu_read_lock();
 	conn = hci_conn_hash_lookup_handle(hdev, handle);
+	if (conn)
+		hci_conn_get(conn);
+	rcu_read_unlock();
+
 	if (!conn)
 		return 0;
 
-	return hci_abort_conn_sync(hdev, conn, conn->abort_reason);
+	res = hci_abort_conn_sync(hdev, conn, conn->abort_reason);
+	hci_conn_put(conn);
+
+	return res;
 }
 
 int hci_abort_conn(struct hci_conn *conn, u8 reason)
