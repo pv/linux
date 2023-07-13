@@ -1901,6 +1901,8 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 	if (!cis)
 		return ERR_PTR(-ENOMEM);
 
+	hci_conn_hold(cis);
+
 	cis->cleanup = cis_cleanup;
 	cis->dst_type = dst_type;
 
@@ -2289,6 +2291,9 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		hci_conn_drop(cis);
 		return ERR_PTR(-ENOLINK);
 	}
+
+	/* The link takes the refcount */
+	hci_conn_drop(cis);
 
 	cis->state = BT_CONNECT;
 
