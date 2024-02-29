@@ -295,6 +295,11 @@ restart:
 }
 EXPORT_SYMBOL(bt_accept_dequeue);
 
+static int bt_sock_recv_error(struct sock *sk, struct msghdr *msg, size_t len)
+{
+	return sock_recv_errqueue(sk, msg, len, SOL_BLUETOOTH, BT_SCM_ERROR);
+}
+
 int bt_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 		    int flags)
 {
@@ -308,6 +313,8 @@ int bt_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 
 	if (flags & MSG_OOB)
 		return -EOPNOTSUPP;
+	if (unlikely(flags & MSG_ERRQUEUE))
+		return bt_sock_recv_error(sk, msg, len);
 
 	lock_sock(sk);
 
@@ -394,6 +401,8 @@ int bt_sock_stream_recvmsg(struct socket *sock, struct msghdr *msg,
 
 	if (flags & MSG_OOB)
 		return -EOPNOTSUPP;
+	if (unlikely(flags & MSG_ERRQUEUE))
+		return bt_sock_recv_error(sk, msg, size);
 
 	BT_DBG("sk %p size %zu", sk, size);
 

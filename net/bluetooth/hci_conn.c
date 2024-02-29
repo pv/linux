@@ -27,6 +27,7 @@
 
 #include <linux/export.h>
 #include <linux/debugfs.h>
+#include <linux/errqueue.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -136,6 +137,18 @@ void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status)
 	}
 
 	hci_update_passive_scan(hdev);
+}
+
+static void hci_conn_tx_info_cleanup(struct hci_conn *conn)
+{
+	unsigned int i;
+
+	for (i = 0; i < conn->tx_info_queue.size; ++i)
+		kfree_skb(conn->tx_info_queue.skbs[i]);
+
+	kfree(conn->tx_info_queue.skbs);
+	conn->tx_info_queue.skbs = NULL;
+	conn->tx_info_queue.size = 0;
 }
 
 static void hci_conn_cleanup(struct hci_conn *conn)
@@ -904,6 +917,39 @@ static int hci_conn_hash_alloc_unset(struct hci_dev *hdev)
 			       U16_MAX, GFP_ATOMIC);
 }
 
+static int hci_conn_tx_info_init(struct hci_conn *conn)
+{
+	struct tx_info_queue *txq = &conn->tx_info_queue;
+	size_t size = 0;
+
+	switch (conn->type) {
+	case ISO_LINK:
+		size = conn->hdev->iso_pkts;
+		if (!size)
+			size = conn->hdev->le_pkts;
+		if (!size)
+			size = conn->hdev->acl_pkts;
+		break;
+	case ACL_LINK:
+		size = conn->hdev->acl_pkts;
+		break;
+	}
+
+	if (size) {
+		txq->skbs = kcalloc(size, sizeof(txq->skbs[0]), GFP_KERNEL);
+		if (!txq->skbs)
+			return -ENOMEM;
+	} else {
+		txq->skbs = NULL;
+	}
+
+	txq->size = size;
+	txq->head = 0;
+	txq->num = 0;
+
+	return 0;
+}
+
 struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 			      u8 role, u16 handle)
 {
@@ -931,6 +977,11 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	conn->tx_power = HCI_TX_POWER_INVALID;
 	conn->max_tx_power = HCI_TX_POWER_INVALID;
 	conn->sync_handle = HCI_SYNC_HANDLE_INVALID;
+
+	if (hci_conn_tx_info_init(conn) < 0) {
+		kfree(conn);
+		return NULL;
+	}
 
 	set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
 	conn->disc_timeout = HCI_DISCONN_TIMEOUT;
@@ -1005,6 +1056,7 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 struct hci_conn *hci_conn_add_unset(struct hci_dev *hdev, int type,
 				    bdaddr_t *dst, u8 role)
 {
+	struct hci_conn *conn;
 	int handle;
 
 	bt_dev_dbg(hdev, "dst %pMR", dst);
@@ -1013,7 +1065,11 @@ struct hci_conn *hci_conn_add_unset(struct hci_dev *hdev, int type,
 	if (unlikely(handle < 0))
 		return NULL;
 
-	return hci_conn_add(hdev, type, dst, role, handle);
+	conn = hci_conn_add(hdev, type, dst, role, handle);
+	if (!conn)
+		ida_free(&hdev->unset_handle_ida, handle);
+
+	return conn;
 }
 
 static void hci_conn_cleanup_child(struct hci_conn *conn, u8 reason)
@@ -1117,6 +1173,8 @@ void hci_conn_del(struct hci_conn *conn)
 	}
 
 	skb_queue_purge(&conn->data_q);
+
+	hci_conn_tx_info_cleanup(conn);
 
 	/* Remove the connection from the list and cleanup its remaining
 	 * state. This is a separate function since for some cases like
@@ -2927,4 +2985,58 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 	}
 
 	return hci_cmd_sync_queue_once(hdev, abort_conn_sync, conn, NULL);
+}
+
+void hci_tx_timestamp(struct sk_buff *skb, const struct sockcm_cookie *sockc)
+{
+	if (!skb || !sockc)
+		return;
+
+	skb_setup_tx_timestamp(skb, sockc->tsflags);
+}
+
+void hci_conn_tx_info_push(struct hci_conn *conn, struct sk_buff *skb)
+{
+	struct tx_info_queue *txq = &conn->tx_info_queue;
+	unsigned int tail;
+
+	if (skb && !skb->sk)
+		skb = NULL;
+
+	if (skb) {
+		if (skb_shinfo(skb)->tx_flags & SKBTX_SCHED_TSTAMP)
+			__skb_tstamp_tx(skb, NULL, NULL, skb->sk,
+					SCM_TSTAMP_SCHED);
+
+		if (!(skb_shinfo(skb)->tx_flags & SKBTX_SW_TSTAMP))
+			skb = NULL;
+	}
+
+	if (!txq->num && !skb)
+		return;
+	if (txq->num >= txq->size || !txq->skbs)
+		return;
+
+	tail = (txq->head + txq->num) % txq->size;
+	txq->skbs[tail] = skb ? skb_clone_sk(skb) : NULL;
+	txq->num++;
+}
+
+void hci_conn_tx_info_pop(struct hci_conn *conn)
+{
+	struct tx_info_queue *txq = &conn->tx_info_queue;
+	struct sk_buff *skb;
+
+	if (!txq->num || !txq->skbs || !txq->size)
+		return;
+
+	skb = txq->skbs[txq->head];
+	txq->skbs[txq->head] = NULL;
+	txq->head = (txq->head + 1) % txq->size;
+	txq->num--;
+
+	if (skb) {
+		skb_tstamp_tx(skb, NULL);
+		kfree_skb(skb);
+	}
 }
