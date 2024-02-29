@@ -1266,6 +1266,7 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 {
 	struct sock *sk = sock->sk;
 	struct sk_buff *skb, **frag;
+	struct sockcm_cookie sockc;
 	size_t mtu;
 	int err;
 
@@ -1277,6 +1278,14 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 
 	if (msg->msg_flags & MSG_OOB)
 		return -EOPNOTSUPP;
+
+	sockcm_init(&sockc, sk);
+
+	if (msg->msg_controllen) {
+		err = sock_cmsg_send(sk, msg, &sockc);
+		if (err)
+			return err;
+	}
 
 	lock_sock(sk);
 
@@ -1319,6 +1328,8 @@ static int iso_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 
 		frag = &(*frag)->next;
 	}
+
+	hci_tx_timestamp(skb, &sockc);
 
 	lock_sock(sk);
 
