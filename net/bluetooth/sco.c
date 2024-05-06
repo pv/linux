@@ -1037,6 +1037,8 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 	struct hci_dev *hdev;
 	struct hci_codec_caps *caps;
 	struct bt_codec codec;
+	struct sco_conn *conn;
+	unsigned int mtu;
 
 	BT_DBG("sk %p", sk);
 
@@ -1096,7 +1098,21 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 			break;
 		}
 
-		if (put_user(sco_pi(sk)->conn->mtu, (u32 __user *)optval))
+		mtu = 0;
+
+		/* Driver may have expected HCI packet size that differs from
+		 * SCO MTU.
+		 */
+		conn = sco_pi(sk)->conn;
+		sco_conn_lock(conn);
+		if (optname == BT_SNDMTU && conn->hcon)
+			mtu = READ_ONCE(conn->hcon->hdev->sco_payload_size);
+		sco_conn_unlock(conn);
+
+		if (!mtu)
+			mtu = sco_pi(sk)->conn->mtu;
+
+		if (put_user(mtu, (u32 __user *)optval))
 			err = -EFAULT;
 		break;
 

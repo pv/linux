@@ -477,6 +477,8 @@ struct hci_dev {
 	unsigned int	le_pkts;
 	unsigned int	iso_pkts;
 
+	unsigned int	sco_payload_size;
+
 	unsigned long	acl_last_tx;
 	unsigned long	sco_last_tx;
 	unsigned long	le_last_tx;
