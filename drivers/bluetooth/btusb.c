@@ -2132,19 +2132,6 @@ static int btusb_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 	return -EILSEQ;
 }
 
-static void btusb_notify(struct hci_dev *hdev, unsigned int evt)
-{
-	struct btusb_data *data = hci_get_drvdata(hdev);
-
-	BT_DBG("%s evt %d", hdev->name, evt);
-
-	if (hci_conn_num(hdev, SCO_LINK) != data->sco_num) {
-		data->sco_num = hci_conn_num(hdev, SCO_LINK);
-		data->air_mode = evt;
-		schedule_work(&data->work);
-	}
-}
-
 static inline int __set_isoc_interface(struct hci_dev *hdev, int altsetting)
 {
 	struct btusb_data *data = hci_get_drvdata(hdev);
@@ -2247,11 +2234,144 @@ static struct usb_host_interface *btusb_find_altsetting(struct btusb_data *data,
 	return NULL;
 }
 
+static int voice_payload(struct btusb_data *data, int altsetting, int num)
+{
+	struct usb_host_interface *alts;
+	struct usb_endpoint_descriptor *ep;
+	int i, uframes, divisor, hci_size;
+
+	/* Compute HCI SCO packet payload size such that HCI and USB data rates
+	 * exactly match for the PCM audio setting we are configuring:
+	 *
+	 * usb_rate = wMaxPacketSize / interval_ms * 1000 Hz
+	 * hci_rate = num * hci_size * 8000 Hz / payload
+	 * hci_size = payload + 3
+	 * interval_ms = uframes / 8
+	 * num = num_conn * sample_size * (audio_rate / 8000 Hz)
+	 *
+	 * If usb_rate == hci_rate, then
+	 *
+	 * hci_size = 3 * wMaxPacketSize / (num * uframes - wMaxPacketSize)
+	 *
+	 * This must give an integer such that hci_size % wMaxPacketSize == 0,
+	 * otherwise we give up calculating the value.
+	 *
+	 * For Core v5.4 Vol 4 Part B §2.1.1 Table 2.1 configurations,
+	 * this calculation gives payload = 3*wMaxPacketSize - 3.
+	 *
+	 * In practice, controllers appear to also require payloads of exactly
+	 * this size, even though larger values would give hci_rate < usb_rate.
+	 */
+
+	alts = btusb_find_altsetting(data, altsetting);
+	if (!alts)
+		return -EINVAL;
+
+	for (i = 0; i < alts->desc.bNumEndpoints; i++, ep = NULL) {
+		ep = &alts->endpoint[i].desc;
+		if (usb_endpoint_is_isoc_out(ep))
+			break;
+	}
+	if (!ep || !ep->wMaxPacketSize)
+		return -EINVAL;
+
+	uframes = usb_decode_interval(ep, data->udev->speed) / 125;
+
+	divisor = num * uframes - ep->wMaxPacketSize;
+	if (divisor <= 0)
+		return -EINVAL;
+
+	hci_size = 3 * ep->wMaxPacketSize;
+	if (hci_size % divisor != 0)
+		return -EINVAL;
+
+	hci_size = hci_size / divisor;
+	if (hci_size % ep->wMaxPacketSize != 0 || hci_size <= 3)
+		return -EINVAL;
+
+	return hci_size - 3;
+}
+
+static int btusb_select_altsetting(struct btusb_data *data, int *payload)
+{
+	struct hci_dev *hdev = data->hdev;
+	int new_alts = 0;
+	int new_payload = 0;
+	int num;
+
+	if (data->air_mode == HCI_NOTIFY_ENABLE_SCO_CVSD) {
+		num = data->sco_num;
+		if (hdev->voice_setting & 0x0020)
+			num *= 2;  /* 16 bit */
+
+		/* Assume Core spec 5, vol 4, B 2.1.1 & Table 2.1 alts */
+		new_alts = min(num, 5);
+
+		new_payload = voice_payload(data, new_alts, num);
+	} else if (data->air_mode == HCI_NOTIFY_ENABLE_SCO_TRANSP) {
+		/* Bluetooth USB spec recommends alt 6 (63 bytes), but
+		 * many adapters do not support it.  Alt 1 appears to
+		 * work for all adapters that do not have alt 6, and
+		 * which work with WBS at all.  Some devices prefer
+		 * alt 3 (HCI payload >= 60 Bytes let air packet
+		 * data satisfy 60 bytes).
+		 * See Core spec 5, vol 4, B 2.1.1 & Table 2.1.
+		 *
+		 * It appears Alt 1/3 modes expect same payload sizes as
+		 * recommended for PCM streams in the table. Alt 6 fits
+		 * one mSBC packet and controllers appear to support that.
+		 */
+		if (btusb_find_altsetting(data, 6)) {
+			new_alts = 6;
+			new_payload = 60;
+		} else if (btusb_find_altsetting(data, 3) &&
+			   hdev->sco_mtu >= 72 &&
+			   test_bit(BTUSB_USE_ALT3_FOR_WBS, &data->flags)) {
+			new_alts = 3;
+			new_payload = voice_payload(data, 3, 3);
+		} else if (btusb_find_altsetting(data, 1)) {
+			new_alts = 1;
+			new_payload = voice_payload(data, 1, 1);
+		}
+	}
+
+	if (new_payload > hdev->sco_mtu || new_payload < 0)
+		new_payload = 0;
+
+	if (payload)
+		WRITE_ONCE(*payload, new_payload);
+
+	return new_alts;
+}
+
+static void btusb_notify(struct hci_dev *hdev, unsigned int evt)
+{
+	struct btusb_data *data = hci_get_drvdata(hdev);
+
+	BT_DBG("%s evt %d", hdev->name, evt);
+
+	if (evt == HCI_NOTIFY_ENABLE_SCO_OTHER) {
+		WRITE_ONCE(hdev->sco_payload_size, 0);
+		return;
+	}
+
+	if (hci_conn_num(hdev, SCO_LINK) != data->sco_num) {
+		data->sco_num = hci_conn_num(hdev, SCO_LINK);
+		data->air_mode = evt;
+
+		/* Payload size_shall be set before notify returns */
+		btusb_select_altsetting(data, &hdev->sco_payload_size);
+
+		schedule_work(&data->work);
+	}
+}
+
 static void btusb_work(struct work_struct *work)
 {
 	struct btusb_data *data = container_of(work, struct btusb_data, work);
 	struct hci_dev *hdev = data->hdev;
 	int new_alts = 0;
+	int payload_size;
 	int err;
 
 	if (data->sco_num > 0) {
@@ -2266,36 +2386,13 @@ static void btusb_work(struct work_struct *work)
 			set_bit(BTUSB_DID_ISO_RESUME, &data->flags);
 		}
 
-		if (data->air_mode == HCI_NOTIFY_ENABLE_SCO_CVSD) {
-			if (hdev->voice_setting & 0x0020) {
-				static const int alts[3] = { 2, 4, 5 };
-
-				new_alts = alts[data->sco_num - 1];
-			} else {
-				new_alts = data->sco_num;
-			}
-		} else if (data->air_mode == HCI_NOTIFY_ENABLE_SCO_TRANSP) {
-			/* Bluetooth USB spec recommends alt 6 (63 bytes), but
-			 * many adapters do not support it.  Alt 1 appears to
-			 * work for all adapters that do not have alt 6, and
-			 * which work with WBS at all.  Some devices prefer
-			 * alt 3 (HCI payload >= 60 Bytes let air packet
-			 * data satisfy 60 bytes), requiring
-			 * MTU >= 3 (packets) * 25 (size) - 3 (headers) = 72
-			 * see also Core spec 5, vol 4, B 2.1.1 & Table 2.1.
-			 */
-			if (btusb_find_altsetting(data, 6))
-				new_alts = 6;
-			else if (btusb_find_altsetting(data, 3) &&
-				 hdev->sco_mtu >= 72 &&
-				 test_bit(BTUSB_USE_ALT3_FOR_WBS, &data->flags))
-				new_alts = 3;
-			else
-				new_alts = 1;
-		}
+		new_alts = btusb_select_altsetting(data, &payload_size);
 
 		if (btusb_switch_alt_setting(hdev, new_alts) < 0)
 			bt_dev_err(hdev, "set USB alt:(%d) failed!", new_alts);
+		else
+			bt_dev_dbg(hdev, "set USB alt:(%d) payload %d",
+				   new_alts, payload_size);
 	} else {
 		usb_kill_anchored_urbs(&data->isoc_anchor);
 

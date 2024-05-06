@@ -3209,6 +3209,10 @@ done:
 			if (hdev->notify)
 				hdev->notify(hdev, HCI_NOTIFY_ENABLE_SCO_CVSD);
 			break;
+		default:
+			if (hdev->notify)
+				hdev->notify(hdev, HCI_NOTIFY_ENABLE_SCO_OTHER);
+			break;
 		}
 
 		hci_connect_cfm(conn, status);
@@ -4992,16 +4996,22 @@ static void hci_sync_conn_complete_evt(struct hci_dev *hdev, void *data,
 	}
 
 	bt_dev_dbg(hdev, "SCO connected with air mode: %02x", ev->air_mode);
-	/* Notify only in case of SCO over HCI transport data path which
-	 * is zero and non-zero value shall be non-HCI transport data path
+
+	/* SCO over HCI transport data path is zero and non-zero value shall be
+	 * non-HCI transport data path
 	 */
-	if (conn->codec.data_path == 0 && hdev->notify) {
-		switch (ev->air_mode) {
+	if (hdev->notify) {
+		u8 air_mode = (conn->codec.data_path == 0) ? ev->air_mode : 0;
+
+		switch (air_mode) {
 		case 0x02:
 			hdev->notify(hdev, HCI_NOTIFY_ENABLE_SCO_CVSD);
 			break;
 		case 0x03:
 			hdev->notify(hdev, HCI_NOTIFY_ENABLE_SCO_TRANSP);
+			break;
+		default:
+			hdev->notify(hdev, HCI_NOTIFY_ENABLE_SCO_OTHER);
 			break;
 		}
 	}
