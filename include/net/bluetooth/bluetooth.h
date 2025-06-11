@@ -244,6 +244,18 @@ struct bt_codecs {
 
 #define BT_ISO_BASE		20
 
+#define BT_SCO_PARAMS		21
+
+struct bt_sco_params {
+	__u16 pkt_type;
+	__u16 max_latency;
+	__u16 retrans_effort;
+	__u16 in_bandwidth;
+	__u16 out_bandwidth;
+	__u16 tx_codec_frame_size;
+	__u16 rx_codec_frame_size;
+} __packed;
+
 __printf(1, 2)
 void bt_info(const char *fmt, ...);
 __printf(1, 2)

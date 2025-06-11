@@ -71,6 +71,7 @@ struct sco_pinfo {
 	__u16		setting;
 	struct bt_codec codec;
 	struct sco_conn	*conn;
+	struct bt_sco_params sco_params;
 };
 
 /* ---- SCO timers ---- */
@@ -338,6 +339,7 @@ static int sco_connect(struct sock *sk)
 
 	hcon = hci_connect_sco(hdev, type, &sco_pi(sk)->dst,
 			       sco_pi(sk)->setting, &sco_pi(sk)->codec,
+			       &sco_pi(sk)->sco_params,
 			       sk->sk_sndtimeo);
 	if (IS_ERR(hcon)) {
 		err = PTR_ERR(hcon);
@@ -905,6 +907,7 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 	struct sock *sk = sock->sk;
 	int err = 0;
 	struct bt_voice voice;
+	struct bt_sco_params sco_params;
 	u32 opt;
 	struct bt_codecs *codecs;
 	struct hci_dev *hdev;
@@ -962,6 +965,23 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 
 		hci_dev_put(hdev);
+		break;
+
+	case BT_SCO_PARAMS:
+		if (sk->sk_state != BT_OPEN && sk->sk_state != BT_BOUND &&
+		    sk->sk_state != BT_CONNECT2) {
+			err = -EINVAL;
+			break;
+		}
+
+		memcpy(&sco_params, &sco_pi(sk)->sco_params, sizeof(sco_params));
+
+		err = copy_safe_from_sockptr(&sco_params, sizeof(sco_params), optval,
+					     optlen);
+		if (err)
+			break;
+
+		memcpy(&sco_pi(sk)->sco_params, &sco_params, sizeof(sco_params));
 		break;
 
 	case BT_PKT_STATUS:
@@ -1111,6 +1131,7 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 	struct hci_dev *hdev;
 	struct hci_codec_caps *caps;
 	struct bt_codec codec;
+	struct bt_sco_params sco_params;
 
 	BT_DBG("sk %p", sk);
 
@@ -1141,6 +1162,15 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 
 		len = min_t(unsigned int, len, sizeof(voice));
 		if (copy_to_user(optval, (char *)&voice, len))
+			err = -EFAULT;
+
+		break;
+
+	case BT_SCO_PARAMS:
+		memcpy(&sco_params, &sco_pi(sk)->sco_params, sizeof(sco_params));
+
+		len = min_t(unsigned int, len, sizeof(sco_params));
+		if (copy_to_user(optval, (char *)&sco_params, len))
 			err = -EFAULT;
 
 		break;

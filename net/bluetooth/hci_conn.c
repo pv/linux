@@ -334,19 +334,20 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 		cp.out_data_path = conn->codec.data_path;
 		cp.in_transport_unit_size = 1;
 		cp.out_transport_unit_size = 1;
+		cp.retrans_effort = param->retrans_effort;
+		cp.pkt_type = __cpu_to_le16(param->pkt_type);
+		cp.max_latency = __cpu_to_le16(param->max_latency);
 		break;
 
 	case BT_CODEC_TRANSPARENT:
-		if (!find_next_esco_param(conn, esco_param_msbc,
-					  ARRAY_SIZE(esco_param_msbc)))
+		if (conn->attempt > 1)
 			return false;
-		param = &esco_param_msbc[conn->attempt - 1];
 		cp.tx_coding_format.id = 0x03;
 		cp.rx_coding_format.id = 0x03;
-		cp.tx_codec_frame_size = __cpu_to_le16(60);
-		cp.rx_codec_frame_size = __cpu_to_le16(60);
-		cp.in_bandwidth = __cpu_to_le32(0x1f40);
-		cp.out_bandwidth = __cpu_to_le32(0x1f40);
+		cp.tx_codec_frame_size = __cpu_to_le16(conn->sco_params.tx_codec_frame_size);
+		cp.rx_codec_frame_size = __cpu_to_le16(conn->sco_params.rx_codec_frame_size);
+		cp.in_bandwidth = __cpu_to_le32(conn->sco_params.in_bandwidth);
+		cp.out_bandwidth = __cpu_to_le32(conn->sco_params.out_bandwidth);
 		cp.in_coding_format.id = 0x03;
 		cp.out_coding_format.id = 0x03;
 		cp.in_coded_data_size = __cpu_to_le16(16);
@@ -359,6 +360,10 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 		cp.out_data_path = conn->codec.data_path;
 		cp.in_transport_unit_size = 1;
 		cp.out_transport_unit_size = 1;
+
+		cp.retrans_effort = conn->sco_params.retrans_effort;
+		cp.pkt_type = __cpu_to_le16(conn->sco_params.pkt_type);
+		cp.max_latency = __cpu_to_le16(conn->sco_params.max_latency);
 		break;
 
 	case BT_CODEC_CVSD:
@@ -390,14 +395,13 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 		cp.out_data_path = conn->codec.data_path;
 		cp.in_transport_unit_size = 16;
 		cp.out_transport_unit_size = 16;
+		cp.retrans_effort = param->retrans_effort;
+		cp.pkt_type = __cpu_to_le16(param->pkt_type);
+		cp.max_latency = __cpu_to_le16(param->max_latency);
 		break;
 	default:
 		return -EINVAL;
 	}
-
-	cp.retrans_effort = param->retrans_effort;
-	cp.pkt_type = __cpu_to_le16(param->pkt_type);
-	cp.max_latency = __cpu_to_le16(param->max_latency);
 
 	if (hci_send_cmd(hdev, HCI_OP_ENHANCED_SETUP_SYNC_CONN, sizeof(cp), &cp) < 0)
 		return -EIO;
@@ -1687,6 +1691,7 @@ static struct hci_link *hci_conn_link(struct hci_conn *parent,
 
 struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
 				 __u16 setting, struct bt_codec *codec,
+				 struct bt_sco_params *sco_params,
 				 u16 timeout)
 {
 	struct hci_conn *acl;
@@ -1716,6 +1721,7 @@ struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
 
 	sco->setting = setting;
 	sco->codec = *codec;
+	sco->sco_params = *sco_params;
 
 	if (acl->state == BT_CONNECTED &&
 	    (sco->state == BT_OPEN || sco->state == BT_CLOSED)) {
