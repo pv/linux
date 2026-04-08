@@ -767,9 +767,13 @@ struct hci_conn {
 	struct dentry	*debugfs;
 
 	struct hci_dev	*hdev;
+
+	/* Lock to guard protocol data */
+	spinlock_t      proto_lock;
+
 	void		*l2cap_data;
 	void		*sco_data;
-	void		*iso_data;
+	void __rcu	*iso_data;
 
 	struct list_head link_list;
 	struct hci_conn	*parent;
