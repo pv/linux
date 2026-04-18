@@ -129,6 +129,7 @@ static struct sco_conn *sco_conn_hold_unless_zero(struct sco_conn *conn)
 }
 
 static struct sock *sco_sock_hold(struct sco_conn *conn)
+	__must_hold(&conn->lock)
 {
 	if (!conn || !bt_sock_linked(&sco_sk_list, conn->sk))
 		return NULL;
@@ -1373,9 +1374,7 @@ static void sco_conn_ready(struct sco_conn *conn)
 {
 	struct sock *parent, *sk;
 
-	sco_conn_lock(conn);
 	sk = sco_sock_hold(conn);
-	sco_conn_unlock(conn);
 
 	BT_DBG("conn %p", conn);
 
