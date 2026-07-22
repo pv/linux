@@ -108,15 +108,6 @@ static void iso_conn_free(struct kref *ref)
 
 	BT_DBG("conn %p", conn);
 
-	if (conn->sk)
-		iso_pi(conn->sk)->conn = NULL;
-
-	if (conn->hcon) {
-		conn->hcon->iso_data = NULL;
-		if (!test_and_set_bit(ISO_CONN_DROPPED, conn->flags))
-			hci_conn_drop(conn->hcon);
-	}
-
 	kfree_skb(conn->rx_skb);
 
 	kfree(conn);
@@ -132,20 +123,19 @@ static void iso_conn_put(struct iso_conn *conn)
 	kref_put(&conn->ref, iso_conn_free);
 }
 
-static struct iso_conn *iso_conn_hold_unless_zero(struct iso_conn *conn)
+static struct iso_conn *iso_conn_hold(struct iso_conn *conn)
 {
 	if (!conn)
 		return NULL;
 
 	BT_DBG("conn %p refcnt %u", conn, kref_read(&conn->ref));
 
-	if (!kref_get_unless_zero(&conn->ref))
-		return NULL;
-
+	kref_get(&conn->ref);
 	return conn;
 }
 
 static struct sock *iso_sock_hold(struct iso_conn *conn)
+	__must_hold(&conn->lock)
 {
 	if (!conn || !bt_sock_linked(&iso_sk_list, conn->sk))
 		return NULL;
@@ -200,19 +190,13 @@ static void iso_sock_disable_timer(struct sock *sk)
 
 /* ---- ISO connections ---- */
 static struct iso_conn *iso_conn_add(struct hci_conn *hcon)
+	__must_hold(&hcon->hdev->lock)
 {
 	struct iso_conn *conn = hcon->iso_data;
 
-	conn = iso_conn_hold_unless_zero(conn);
-	if (conn) {
-		if (!conn->hcon) {
-			iso_conn_lock(conn);
-			conn->hcon = hcon;
-			iso_conn_unlock(conn);
-		}
-		iso_conn_put(conn);
+	conn = iso_conn_hold(conn);
+	if (conn)
 		return conn;
-	}
 
 	conn = kzalloc_obj(*conn);
 	if (!conn)
@@ -221,7 +205,7 @@ static struct iso_conn *iso_conn_add(struct hci_conn *hcon)
 	kref_init(&conn->ref);
 	spin_lock_init(&conn->lock);
 
-	hcon->iso_data = conn;
+	hcon->iso_data = iso_conn_hold(conn);
 	conn->hcon = hcon;
 	conn->tx_sn = 0;
 
@@ -242,6 +226,9 @@ static void iso_chan_del(struct sock *sk, int err)
 	BT_DBG("sk %p, conn %p, err %d", sk, conn, err);
 
 	if (conn) {
+		if (!test_and_set_bit(ISO_CONN_DROPPED, conn->flags))
+			hci_conn_drop(conn->hcon);
+
 		iso_conn_lock(conn);
 		conn->sk = NULL;
 		iso_conn_unlock(conn);
@@ -263,11 +250,11 @@ static void iso_chan_del(struct sock *sk, int err)
 }
 
 static void iso_conn_del(struct hci_conn *hcon, int err)
+	__must_hold(&hcon->hdev->lock)
 {
 	struct iso_conn *conn = hcon->iso_data;
 	struct sock *sk;
 
-	conn = iso_conn_hold_unless_zero(conn);
 	if (!conn)
 		return;
 
@@ -277,12 +264,9 @@ static void iso_conn_del(struct hci_conn *hcon, int err)
 	iso_conn_lock(conn);
 	sk = iso_sock_hold(conn);
 	iso_conn_unlock(conn);
-	iso_conn_put(conn);
 
-	if (!sk) {
-		iso_conn_put(conn);
-		return;
-	}
+	if (!sk)
+		goto done;
 
 	iso_sock_disable_timer(sk);
 
@@ -291,10 +275,19 @@ static void iso_conn_del(struct hci_conn *hcon, int err)
 	release_sock(sk);
 	iso_sock_kill(sk);
 	sock_put(sk);
+
+done:
+	/* No sk access to conn->hcon any more (lock_sock + hdev->lock) */
+	iso_conn_lock(conn);
+	conn->hcon = NULL;
+	hcon->iso_data = NULL;
+	iso_conn_unlock(conn);
+	iso_conn_put(conn);
 }
 
 static int __iso_chan_add(struct iso_conn *conn, struct sock *sk,
 			  struct sock *parent)
+	__must_hold(&conn->lock)
 {
 	BT_DBG("conn %p", conn);
 
@@ -306,7 +299,12 @@ static int __iso_chan_add(struct iso_conn *conn, struct sock *sk,
 		return -EBUSY;
 	}
 
-	iso_pi(sk)->conn = conn;
+	if (!conn->hcon) {
+		BT_ERR("conn->hcon missing");
+		return -EIO;
+	}
+
+	iso_pi(sk)->conn = iso_conn_hold(conn);
 	conn->sk = sk;
 	clear_bit(ISO_CONN_DROPPED, conn->flags);
 
@@ -405,6 +403,8 @@ static int iso_connect_bis(struct sock *sk)
 			iso_pi(sk)->bc_sid = hcon->sid;
 	}
 
+	lockdep_assert_held(&hcon->hdev->lock);
+
 	conn = iso_conn_add(hcon);
 	if (!conn) {
 		hci_conn_drop(hcon);
@@ -413,8 +413,11 @@ static int iso_connect_bis(struct sock *sk)
 	}
 
 	err = iso_chan_add(conn, sk, NULL);
-	if (err)
+	iso_conn_put(conn);
+	if (err) {
+		hci_conn_drop(hcon);
 		goto unlock;
+	}
 
 	/* Update source addr of the socket */
 	bacpy(&iso_pi(sk)->src, &hcon->src);
@@ -507,6 +510,8 @@ static int iso_connect_cis(struct sock *sk)
 		}
 	}
 
+	lockdep_assert_held(&hcon->hdev->lock);
+
 	conn = iso_conn_add(hcon);
 	if (!conn) {
 		hci_conn_drop(hcon);
@@ -515,8 +520,11 @@ static int iso_connect_cis(struct sock *sk)
 	}
 
 	err = iso_chan_add(conn, sk, NULL);
-	if (err)
+	iso_conn_put(conn);
+	if (err) {
+		hci_conn_drop(hcon);
 		goto unlock;
+	}
 
 	/* Update source addr of the socket */
 	bacpy(&iso_pi(sk)->src, &hcon->src);
@@ -834,11 +842,13 @@ static void iso_sock_disconn(struct sock *sk)
 		/* If there are any other connected sockets for the
 		 * same BIG, just delete the sk and leave the bis
 		 * hcon active, in case later rebinding is needed.
+		 *
+		 * This leaks hci_conn_hold() reference, balanced by
+		 * hci_bind_bis not returning new reference for BT_OPEN.
 		 */
 		if (bis_sk) {
 			hcon->state = BT_OPEN;
-			hcon->iso_data = NULL;
-			iso_pi(sk)->conn->hcon = NULL;
+			set_bit(ISO_CONN_DROPPED, iso_pi(sk)->conn->flags);
 			iso_sock_clear_timer(sk);
 			iso_chan_del(sk, bt_to_errno(hcon->abort_reason));
 			sock_put(bis_sk);
@@ -1288,6 +1298,8 @@ static int iso_listen_bis(struct sock *sk)
 		goto unlock;
 	}
 
+	lockdep_assert_held(&hcon->hdev->lock);
+
 	conn = iso_conn_add(hcon);
 	if (!conn) {
 		hci_conn_drop(hcon);
@@ -1296,6 +1308,7 @@ static int iso_listen_bis(struct sock *sk)
 	}
 
 	err = iso_chan_add(conn, sk, NULL);
+	iso_conn_put(conn);
 	if (err) {
 		hci_conn_drop(hcon);
 		goto unlock;
@@ -2509,6 +2522,7 @@ done:
 }
 
 static void iso_connect_cfm(struct hci_conn *hcon, __u8 status)
+	__must_hold(&hcon->hdev->lock)
 {
 	if (hcon->type != CIS_LINK && hcon->type != BIS_LINK &&
 	    hcon->type != PA_LINK) {
@@ -2520,8 +2534,10 @@ static void iso_connect_cfm(struct hci_conn *hcon, __u8 status)
 			struct hci_link *link, *t;
 
 			list_for_each_entry_safe(link, t, &hcon->link_list,
-						 list)
+						 list) {
+				lockdep_assert_held(&link->conn->hdev->lock);
 				iso_conn_del(link->conn, bt_to_errno(status));
+			}
 
 			return;
 		}
@@ -2543,14 +2559,17 @@ static void iso_connect_cfm(struct hci_conn *hcon, __u8 status)
 		struct iso_conn *conn;
 
 		conn = iso_conn_add(hcon);
-		if (conn)
+		if (conn) {
 			iso_conn_ready(conn);
+			iso_conn_put(conn);
+		}
 	} else {
 		iso_conn_del(hcon, bt_to_errno(status));
 	}
 }
 
 static void iso_disconn_cfm(struct hci_conn *hcon, __u8 reason)
+	__must_hold(&hcon->hdev->lock)
 {
 	if (hcon->type != CIS_LINK && hcon->type !=  BIS_LINK &&
 	    hcon->type != PA_LINK)
@@ -2577,7 +2596,9 @@ int iso_recv(struct hci_dev *hdev, u16 handle, struct sk_buff *skb, u16 flags)
 		return -ENOENT;
 	}
 
-	conn = iso_conn_hold_unless_zero(hcon->iso_data);
+	lockdep_assert_held(&hcon->hdev->lock);
+
+	conn = iso_conn_hold(hcon->iso_data);
 	hcon = NULL;
 
 	hci_dev_unlock(hdev);

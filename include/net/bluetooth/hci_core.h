@@ -769,7 +769,7 @@ struct hci_conn {
 	struct hci_dev	*hdev;
 	void		*l2cap_data;
 	void		*sco_data;
-	void		*iso_data;
+	void		*iso_data __guarded_by(&hdev->lock);
 
 	struct list_head link_list;
 	struct hci_conn	*parent;
