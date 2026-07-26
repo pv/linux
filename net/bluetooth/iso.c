@@ -2154,6 +2154,8 @@ static void iso_conn_ready(struct iso_conn *conn)
 
 		hdev = hcon->hdev;
 
+		lockdep_assert_held(&hdev->lock);
+
 		if (test_bit(HCI_CONN_BIG_SYNC, &hcon->flags)) {
 			/* A BIS slave hcon is notified to the ISO layer
 			 * after the Command Complete for the LE Setup
@@ -2205,12 +2207,13 @@ static void iso_conn_ready(struct iso_conn *conn)
 
 		lock_sock(parent);
 
+		if (parent->sk_state != BT_LISTEN)
+			goto release;
+
 		sk = iso_sock_alloc(sock_net(parent), NULL,
 				    BTPROTO_ISO, GFP_ATOMIC, 0);
-		if (!sk) {
-			release_sock(parent);
-			return;
-		}
+		if (!sk)
+			goto release;
 
 		iso_sock_init(sk, parent);
 
@@ -2254,8 +2257,13 @@ static void iso_conn_ready(struct iso_conn *conn)
 		memcpy(iso_pi(sk)->base, iso_pi(parent)->base, iso_pi(parent)->base_len);
 		iso_pi(sk)->base_len = iso_pi(parent)->base_len;
 
+		if (iso_chan_add(conn, sk, parent)) {
+			bt_sock_unlink(&iso_sk_list, sk);
+			sock_put(sk);
+			goto release;
+		}
+
 		hci_conn_hold(hcon);
-		iso_chan_add(conn, sk, parent);
 
 		if ((ev && ((struct hci_evt_le_big_sync_established *)ev)->status) ||
 		    (ev2 && ev2->status)) {
@@ -2272,6 +2280,7 @@ static void iso_conn_ready(struct iso_conn *conn)
 		/* Wake up parent */
 		parent->sk_data_ready(parent);
 
+release:
 		release_sock(parent);
 		sock_put(parent);
 	}
